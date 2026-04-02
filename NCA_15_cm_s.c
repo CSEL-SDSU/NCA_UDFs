@@ -40,7 +40,9 @@
      const real I = 0.002243881756148; // [m^2] Computed in Matlab, changes with different surface profiles. Corresponds to Hossain V_g = 8.2 cm/s curve
      const real rho = 1190; // [kg/m^3] Density of solid phase
 
-	 Thread* t;         
+     // Find wall_mass_flux thread
+	 int zone_ID = 5; // ID of surface zone where chemical reaction occurs, update if different. Zone is shown in Boundary conditions tab
+	 Thread* t = Lookup_Thread(d, zone_ID); // Get thread pointer for surface zone where chemical reaction occurs
 
 	 real mdot_chem = 0.; //Mass flux from chemical reaction at surface [kg/s]
      real V_f;
