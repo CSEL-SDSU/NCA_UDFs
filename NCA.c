@@ -6,7 +6,7 @@
 /* CODE SECTION */
 /* FD INLET VELOCITY PROFILE */ 
 
- DEFINE_PROFILE(inlet_x_vel_15cms, thread, position) 
+ DEFINE_PROFILE(inlet_x_vel_8cms, thread, position) 
  {
     real x[ND_ND]; /* this will hold the position vector */
     real y, h, U_mean, U_max, m, n;
