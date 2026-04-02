@@ -54,7 +54,7 @@
          // according to section 3.2.2.4 of Fluent Customization manual. So we can sum this value across
          // all faces along the surface to get total mass flow rate from chemical reaction at surface.
 
-		 mdot_chem += F_FLUX(f, thread); // Sum mass fluxes on each face from chemical reaction at surface
+		 mdot_chem += F_FLUX(f, t); // Sum mass fluxes on each face from chemical reaction at surface
      }
      end_f_loop(f, t)
 
