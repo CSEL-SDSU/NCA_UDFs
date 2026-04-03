@@ -1,7 +1,7 @@
 
  #include "udf.h"
 
-
+static real V_f = 0; // Initialize flame spread rate variable, will be updated at end of each iteration in calc_FSR and used in inlet velocity profile and solid motion BCs
 
 /* CODE SECTION */
 /* FD INLET VELOCITY PROFILE */ 
@@ -16,7 +16,7 @@
 	m = 27.59596236; /* constant, do not change */ 
 	n = 2.0; /* constant, do not change */
 
-	U_mean = 0.082; /* m/sec; inlet mean velocity, update with geom */
+	U_mean = 0.082 + V_f; /* m/sec; inlet mean velocity, update with geom */
 	U_max = U_mean*((m+1)/m)*((n+1)/n); /* m/sec; max velocity, at centerline... calc */ 
 
     begin_f_loop(f,thread)
@@ -30,7 +30,7 @@
  }
 
  // Calculate Flame Spread Rate
- DEFINE_ADJUST(calc_FSR, d)
+ DEFINE_EXECUTE_AT_END(calc_FSR)
  {
 
      // Integral of the x-component of the normal vector f'(x)/sqrt(f'(x)^2+1
@@ -41,31 +41,67 @@
      const real rho = 1190; // [kg/m^3] Density of solid phase
 
      // Find wall_mass_flux thread
+	 Domain* d = Get_Domain(1); // Get domain pointer, update if different
 	 int zone_ID = 5; // ID of surface zone where chemical reaction occurs, update if different. Zone is shown in Boundary conditions tab
 	 Thread* t = Lookup_Thread(d, zone_ID); // Get thread pointer for surface zone where chemical reaction occurs
 
 	 real mdot_chem = 0.; //Mass flux from chemical reaction at surface [kg/s]
-     real V_f;
+     //real V_f;
 
      face_t f; // Face along surface
 
 	 // Loop through faces along surface and sum mass flux from chemical reaction
      begin_f_loop(f, t)
+     if PRINCIPAL_FACE_P(f,t)
      {
          // Evem though this macro is labeled as "FLUX", it is actually a mass flow rate through a face 
          // according to section 3.2.2.4 of Fluent Customization manual. So we can sum this value across
          // all faces along the surface to get total mass flow rate from chemical reaction at surface.
 
-		 mdot_chem += F_FLUX(f, t); // Sum mass fluxes on each face from chemical reaction at surface
+		 mdot_chem += fabs(F_FLUX(f, t)); // Sum mass fluxes on each face from chemical reaction at surface
      }
      end_f_loop(f, t)
 
+     // Sum mdot over all compute nodes
+     mdot_chem = PRF_GRSUM1(mdot_chem); 
 	 // Calculate corrected FSR and print result
 	 V_f = mdot_chem / (rho * I); // Calculate flame spread rate [m/s]
 
-     printf("Mass flux from chemical reaction at surface: %g kg/s\n", mdot_chem);
-	 printf("Calculated Flame Spread Rate: %g m/s\n", V_f);
+	 // Print Every 25 iterations to avoid excessive printing, update with different frequency if desired.
+     // Count figure out how to automatically pass the profile update interval (count find a macro or rp var for it)
+     if (N_ITER % 25 == 0)
+     {
+         Message0("Mass flux from chemical reaction at surface: %g kg/s\n", mdot_chem);
+         Message0("Calculated Flame Spread Rate: %g m/s\n", V_f);
+     }
+     
 
 	 // Update Solid Motion and Moving Wall BCs with calculated FSR
 	 // Update U_mean in inlet velocity profile with calculated FSR
+ }
+
+ // Update Solid Motion 
+ DEFINE_ZONE_MOTION(update_solid_motion, omega, axis, origin, velocity, current_time, dtime)
+ {
+     NV_D(velocity,=,V_f,0.0,0.0); // Update solid motion velocity with calculated FSR
+
+     return;
+ }
+
+ // Update Moving Wall BCs
+ DEFINE_PROFILE(update_wall_motion, thread, position)
+ {
+     face_t f;
+
+     begin_f_loop(f, thread)
+     {
+		 F_PROFILE(f, thread, position) = V_f;// Update inlet velocity profile with calculated FSR
+     }
+     end_f_loop(f, thread)
+ }
+
+ // Create Report Definition for FSR
+ DEFINE_REPORT_DEFINITION_FN(flame_spread_rate)
+ {
+	 return V_f; // Return calculated flame spread rate for report definition
  }
