@@ -40,15 +40,18 @@ static real V_f = 0; // Initialize flame spread rate variable, will be updated a
      const real I = 0.002243881756148; // [m^2] Computed in Matlab, changes with different surface profiles. Corresponds to Hossain V_g = 8.2 cm/s curve
      const real rho = 1190; // [kg/m^3] Density of solid phase
 
-     // Find wall_mass_flux thread
-	 Domain* d = Get_Domain(1); // Get domain pointer, update if different
-	 int zone_ID = 5; // ID of surface zone where chemical reaction occurs, update if different. Zone is shown in Boundary conditions tab
-	 Thread* t = Lookup_Thread(d, zone_ID); // Get thread pointer for surface zone where chemical reaction occurs
+     
 
 	 real mdot_chem = 0.; //Mass flux from chemical reaction at surface [kg/s]
      //real V_f;
 
      face_t f; // Face along surface
+
+#if !RP_HOST
+     // Find wall_mass_flux thread
+     Domain* d = Get_Domain(1); // Get domain pointer, update if different
+     int zone_ID = 5; // ID of surface zone where chemical reaction occurs, update if different. Zone is shown in Boundary conditions tab
+     Thread* t = Lookup_Thread(d, zone_ID); // Get thread pointer for surface zone where chemical reaction occurs
 
 	 // Loop through faces along surface and sum mass flux from chemical reaction
      begin_f_loop(f, t)
@@ -66,6 +69,8 @@ static real V_f = 0; // Initialize flame spread rate variable, will be updated a
      mdot_chem = PRF_GRSUM1(mdot_chem); 
 	 // Calculate corrected FSR and print result
 	 V_f = mdot_chem / (rho * I); // Calculate flame spread rate [m/s]
+#endif
+     node_to_host_real_1(V_f); // update V_f on host process so report is correct.
 
 	 // Print Every 25 iterations to avoid excessive printing, update with different frequency if desired.
      // Count figure out how to automatically pass the profile update interval (count find a macro or rp var for it)
@@ -84,7 +89,7 @@ static real V_f = 0; // Initialize flame spread rate variable, will be updated a
  DEFINE_ZONE_MOTION(update_solid_motion, omega, axis, origin, velocity, current_time, dtime)
  {
      NV_D(velocity,=,V_f,0.0,0.0); // Update solid motion velocity with calculated FSR
-
+     //Message("Updated solid motion to %g m/s\n", V_f);
      return;
  }
 
@@ -98,6 +103,7 @@ static real V_f = 0; // Initialize flame spread rate variable, will be updated a
 		 F_PROFILE(f, thread, position) = V_f;// Update inlet velocity profile with calculated FSR
      }
      end_f_loop(f, thread)
+     //Message("Updated wall motion to %g m/s\n", V_f);
  }
 
  // Create Report Definition for FSR
