@@ -122,7 +122,7 @@ DEFINE_EXECUTE_AT_END(update_FSR_LSQ)
 			mdot_face = F_FLUX(f, t); // Mass flow from single face
 			mdot += mdot_face; // Sum mass fluxes on each face from chemical reaction at surface
 
-			A_face = F_AREA(A_face, f, t); // Get face area vector for current face
+			F_AREA(A_face, f, t); // Get face area vector for current face
 			A_face_mag = NV_MAG(A_face); // Get face area magnitude for current face
 
 			//mass_flux = mdot_face / A_face_mag; //average mass flux at face [kg/m^2-s]
