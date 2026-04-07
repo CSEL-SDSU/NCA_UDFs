@@ -6,7 +6,7 @@ static real V_f = 0; // Initialize flame spread rate variable, will be updated a
 /* CODE SECTION */
 /* FD INLET VELOCITY PROFILE */
 
-DEFINE_PROFILE(inlet_x_vel_8cms, thread, position)
+DEFINE_PROFILE(inlet_x_vel_8cms_fsr_adj, thread, position)
 {
 	real x[ND_ND]; /* this will hold the position vector */
 	real y, h, U_mean, U_max, m, n;
@@ -29,6 +29,28 @@ DEFINE_PROFILE(inlet_x_vel_8cms, thread, position)
 	end_f_loop(f, thread)
 }
 
+DEFINE_PROFILE(inlet_x_vel_8cms_fsr_preset, thread, position)
+{
+	real x[ND_ND]; /* this will hold the position vector */
+	real y, h, U_mean, U_max, m, n;
+	face_t f;
+
+	h = 0.00495; /* m; inlet height, do not change */
+	m = 27.59596236; /* constant, do not change */
+	n = 2.0; /* constant, do not change */
+
+	U_mean = 0.082 + 0.0000617; /* m/sec; inlet mean velocity, update with geom */
+	U_max = U_mean * ((m + 1) / m) * ((n + 1) / n); /* m/sec; max velocity, at centerline... calc */
+
+	begin_f_loop(f, thread)
+	{
+		F_CENTROID(x, f, thread);
+		y = 2. * (x[1] - 0.5 * h) / h; /* non-dimensional y coordinate, b/c coord sys is at bottom of geom not centerline... calc */
+
+		F_PROFILE(f, thread, position) = U_max * (1.0 - y * y); /* m/sec; velocity as f(y) at centerline... calc */
+	}
+	end_f_loop(f, thread)
+}
 // Calculate Flame Spread Rate
 DEFINE_EXECUTE_AT_END(calc_FSR)
 {
