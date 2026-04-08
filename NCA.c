@@ -62,8 +62,6 @@ DEFINE_EXECUTE_AT_END(calc_FSR)
 	const real I = 0.002243881756148; // [m^2] Computed in Matlab, changes with different surface profiles. Corresponds to Hossain V_g = 8.2 cm/s curve
 	const real rho = 1190; // [kg/m^3] Density of solid phase
 
-
-
 	real mdot_chem = 0.; //Mass flux from chemical reaction at surface [kg/s]
 	//real V_f;
 
@@ -73,7 +71,10 @@ DEFINE_EXECUTE_AT_END(calc_FSR)
 	// Find wall_mass_flux thread
 	Domain* d = Get_Domain(1); // Get domain pointer, update if different
 	int zone_ID = 5; // ID of surface zone where chemical reaction occurs, update if different. Zone is shown in Boundary conditions tab
+	int zone_fixed_ID = 20; // ID of surface of zone with fixed 668 temperature to pick eigenvalue
+
 	Thread* t = Lookup_Thread(d, zone_ID); // Get thread pointer for surface zone where chemical reaction occurs
+	Thread* t_fixed = Lookup_Thread(d, zone_fixed_ID); //pointer to fixed temp surface 
 
 	// Loop through faces along surface and sum mass flux from chemical reaction
 	begin_f_loop(f, t)
@@ -87,8 +88,16 @@ DEFINE_EXECUTE_AT_END(calc_FSR)
 		}
 	end_f_loop(f, t)
 
-		// Sum mdot over all compute nodes
-		mdot_chem = PRF_GRSUM1(mdot_chem);
+	// Add flux from fixed temp face
+	begin_f_loop(f,t_fixed)
+		if PRINCIPAL_FACE_P(f, t_fixed)
+		{
+			mdot_chem += F_FLUX(f, t_fixed);
+		}
+	end_f_loop(f, t_fixed)
+
+	// Sum mdot over all compute nodes
+	mdot_chem = PRF_GRSUM1(mdot_chem);
 	// Calculate corrected FSR and print result
 	V_f = mdot_chem / (rho * I); // Calculate flame spread rate [m/s]
 #endif
@@ -132,7 +141,10 @@ DEFINE_EXECUTE_AT_END(update_FSR_LSQ)
 	// Find wall_mass_flux thread
 	Domain* d = Get_Domain(1); // Get domain pointer, update if different
 	int zone_ID = 5; // ID of surface zone where chemical reaction occurs, update if different. Zone is shown in Boundary conditions tab
+	int zone_fixed_ID = 20; // ID of surface of zone with fixed 668 temperature to pick eigenvalue
+
 	Thread* t = Lookup_Thread(d, zone_ID); // Get thread pointer for surface zone where chemical reaction occurs
+	Thread* t_fixed = Lookup_Thread(d, zone_fixed_ID); //pointer to fixed temp surface 
 
 	// Loop through faces along surface and sum mass flux from chemical reaction
 	begin_f_loop(f, t)
@@ -156,6 +168,25 @@ DEFINE_EXECUTE_AT_END(update_FSR_LSQ)
 
 		}
 	end_f_loop(f, t)
+
+	// Add flux from fixed temp face
+	begin_f_loop(f, t_fixed)
+		if PRINCIPAL_FACE_P(f, t_fixed)
+		{
+			mdot_face = F_FLUX(f, t_fixed); // Mass flow from single face
+			mdot += mdot_face; // Sum mass fluxes on each face from chemical reaction at surface
+
+			F_AREA(A_face, f, t_fixed); // Get face area vector for current face
+			A_face_mag = NV_MAG(A_face); // Get face area magnitude for current face
+
+			//mass_flux = mdot_face / A_face_mag; //average mass flux at face [kg/m^2-s]
+
+			nhat_x = A_face[0] / A_face_mag; // Get x-component of face normal vector for current face
+
+			I_num += mdot_face * nhat_x; // Increment numerator integral with contribution from current face, mdot'' * n_x * A_face = mdot * n_x
+			I_denom += nhat_x * nhat_x * A_face_mag; // Increment denominator integral with contribution from current face, n_x^2 * A_face
+		}
+	end_f_loop(f, t_fixed)
 
 	// Sum mdot over all compute nodes
 	mdot = PRF_GRSUM1(mdot);
