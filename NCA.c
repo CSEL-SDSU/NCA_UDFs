@@ -90,7 +90,7 @@ DEFINE_EXECUTE_AT_END(calc_FSR)
 		// Sum mdot over all compute nodes
 		mdot_chem = PRF_GRSUM1(mdot_chem);
 	// Calculate corrected FSR and print result
-	V_f = mdot_chem / (rho * I); // Calculate flame spread rate [m/s]
+	V_f = fabs(mdot_chem / (rho * I)); // Calculate flame spread rate [m/s]
 #endif
 	node_to_host_real_1(V_f); // update V_f on host process so report is correct.
 
