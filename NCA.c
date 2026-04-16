@@ -29,18 +29,19 @@ DEFINE_PROFILE(inlet_x_vel_rpvar, thread, position)
 
 	// Get U_mean from RP var
 	U_mean = 0.082; /* m/sec; inlet mean velocity, update with geom, default value */
-	bool U_mean_exists = RP_Variable_Exists_P("user/U_mean"); // Check if user-defined parameter exists
-	Message("Checking for user-defined parameter 'user/U_mean': %d\n", U_mean_exists);
+	bool U_mean_exists = RP_Variable_Exists_P("user/u_mean"); // Check if user-defined parameter exists
+	Message("Checking for user-defined parameter 'user/u_mean': %d\n", U_mean_exists);
 
-	if (RP_Variable_Exists_P("user/U_mean"))
+	if (RP_Variable_Exists_P("user/u_mean"))
 	{
-		U_mean = RP_Get_Real("user/U_mean"); // Get mean velocity from user-defined parameter if it exists
+		U_mean = RP_Get_Real("user/u_mean"); // Get mean velocity from user-defined parameter if it exists
 	}
 	else
 	{
-		Message("Warning: User-defined parameter 'user/U_mean' not found. Using default value of %f m/s.\n", U_mean);
+		Message("Warning: User-defined parameter 'user/u_mean' not found. Using default value of %f m/s.\n", U_mean);
 	}
 
+	U_mean = +V_f; // Add calculated FSR to mean velocity for inlet profile
 
 	U_max = U_mean * ((m + 1) / m) * ((n + 1) / n); /* m/sec; max velocity, at centerline... calc */
 
@@ -183,8 +184,8 @@ DEFINE_EXECUTE_AT_END(update_FSR_LSQ)
 		}
 	end_f_loop(f, t)
 
-	// Sum mdot over all compute nodes
-	mdot = PRF_GRSUM1(mdot);
+		// Sum mdot over all compute nodes
+		mdot = PRF_GRSUM1(mdot);
 
 	// Sum integrals over all compute nodes
 	I_num = PRF_GRSUM1(I_num);
