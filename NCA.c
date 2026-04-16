@@ -5,8 +5,18 @@ static real V_f = 0; // Initialize flame spread rate variable, will be updated a
 
 /* CODE SECTION */
 /* FD INLET VELOCITY PROFILE */
-
-DEFINE_PROFILE(inlet_x_vel_8cms_fsr_adj, thread, position)
+/*
+	Modified version of pNCA.c to use RP variable for mean velocity.
+	Put your velocity in the brackets (remove the brackets)
+	Define the variable using the following commands in Fluent TUI:
+	To define: (rp-var-define `user/U_mean [velocity] 'real #f)
+		   ex: (rp-var-define `user/U_mean 0.146073469 'real #f)
+	To get   : (%rpgetvar `user/U_mean)
+	To update: (rpsetvar `user/U_mean 0.1)
+	To access in UDF: RP_Get_Real("user/U_mean");
+				  ex: U_mean = RP_Get_Real("user/U_mean");
+*/
+DEFINE_PROFILE(inlet_x_vel_rpvar, thread, position)
 {
 	real x[ND_ND]; /* this will hold the position vector */
 	real y, h, U_mean, U_max, m, n;
@@ -16,7 +26,21 @@ DEFINE_PROFILE(inlet_x_vel_8cms_fsr_adj, thread, position)
 	m = 27.59596236; /* constant, do not change */
 	n = 2.0; /* constant, do not change */
 
-	U_mean = 0.082 + V_f; /* m/sec; inlet mean velocity, update with geom */
+	// Get U_mean from RP var
+	U_mean = 0.082; /* m/sec; inlet mean velocity, update with geom, default value */
+	bool U_mean_exists = RP_Variable_Exists_P("user/U_mean"); // Check if user-defined parameter exists
+	Message("Checking for user-defined parameter 'user/U_mean': %d\n", U_mean_exists);
+
+	if (RP_Variable_Exists_P("user/U_mean"))
+	{
+		U_mean = RP_Get_Real("user/U_mean"); // Get mean velocity from user-defined parameter if it exists
+	}
+	else
+	{
+		Message("Warning: User-defined parameter 'user/U_mean' not found. Using default value of %f m/s.\n", U_mean);
+	}
+
+
 	U_max = U_mean * ((m + 1) / m) * ((n + 1) / n); /* m/sec; max velocity, at centerline... calc */
 
 	begin_f_loop(f, thread)
@@ -24,7 +48,7 @@ DEFINE_PROFILE(inlet_x_vel_8cms_fsr_adj, thread, position)
 		F_CENTROID(x, f, thread);
 		y = 2. * (x[1] - 0.5 * h) / h; /* non-dimensional y coordinate, b/c coord sys is at bottom of geom not centerline... calc */
 
-		F_PROFILE(f, thread, position) = U_max * (1.0 - y * y); /* m/sec; velocity as f(y) at centerline... calc */
+		F_PROFILE(f, thread, position) = U_max * (1.0 - (y * y)); /* m/sec; velocity as f(y) at centerline... calc */
 	}
 	end_f_loop(f, thread)
 }
@@ -51,6 +75,7 @@ DEFINE_PROFILE(inlet_x_vel_8cms_fsr_preset, thread, position)
 	}
 	end_f_loop(f, thread)
 }
+
 // Calculate Flame Spread Rate
 DEFINE_EXECUTE_AT_END(calc_FSR)
 {
