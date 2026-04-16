@@ -1,5 +1,6 @@
 
 #include "udf.h"
+#include <stdbool.h>
 
 static real V_f = 0; // Initialize flame spread rate variable, will be updated at end of each iteration in calc_FSR and used in inlet velocity profile and solid motion BCs
 
