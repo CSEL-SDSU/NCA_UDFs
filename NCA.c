@@ -30,7 +30,7 @@ DEFINE_PROFILE(inlet_x_vel_rpvar, thread, position)
 	// Get U_mean from RP var
 	U_mean = 0.082; /* m/sec; inlet mean velocity, update with geom, default value */
 	bool U_mean_exists = RP_Variable_Exists_P("user/u_mean"); // Check if user-defined parameter exists
-	Message("Checking for user-defined parameter 'user/u_mean': %d\n", U_mean_exists);
+	Message0("Checking for user-defined parameter 'user/u_mean': %d\n", U_mean_exists);
 
 	if (RP_Variable_Exists_P("user/u_mean"))
 	{
@@ -38,7 +38,7 @@ DEFINE_PROFILE(inlet_x_vel_rpvar, thread, position)
 	}
 	else
 	{
-		Message("Warning: User-defined parameter 'user/u_mean' not found. Using default value of %f m/s.\n", U_mean);
+		Message0("Warning: User-defined parameter 'user/u_mean' not found. Using default value of %f m/s.\n", U_mean);
 	}
 
 	U_mean = +V_f; // Add calculated FSR to mean velocity for inlet profile
@@ -159,7 +159,10 @@ DEFINE_EXECUTE_AT_END(update_FSR_LSQ)
 	// Find wall_mass_flux thread
 	Domain* d = Get_Domain(1); // Get domain pointer, update if different
 	int zone_ID = 5; // ID of surface zone where chemical reaction occurs, update if different. Zone is shown in Boundary conditions tab
+	int zone_fixed_ID = 65; // ID of surface of zone with fixed 668 temperature to pick eigenvalue
+
 	Thread* t = Lookup_Thread(d, zone_ID); // Get thread pointer for surface zone where chemical reaction occurs
+	Thread* t_fixed = Lookup_Thread(d, zone_fixed_ID); //pointer to fixed temp surface 
 
 	// Loop through faces along surface and sum mass flux from chemical reaction
 	begin_f_loop(f, t)
@@ -184,8 +187,27 @@ DEFINE_EXECUTE_AT_END(update_FSR_LSQ)
 		}
 	end_f_loop(f, t)
 
-		// Sum mdot over all compute nodes
-		mdot = PRF_GRSUM1(mdot);
+		// Add flux other reaction thread surface
+	begin_f_loop(f, t_fixed)
+		if PRINCIPAL_FACE_P(f, t_fixed)
+		{
+			mdot_face = F_FLUX(f, t_fixed); // Mass flow from single face
+			mdot += mdot_face; // Sum mass fluxes on each face from chemical reaction at surface
+
+			F_AREA(A_face, f, t_fixed); // Get face area vector for current face
+			A_face_mag = NV_MAG(A_face); // Get face area magnitude for current face
+
+			//mass_flux = mdot_face / A_face_mag; //average mass flux at face [kg/m^2-s]
+
+			nhat_x = A_face[0] / A_face_mag; // Get x-component of face normal vector for current face
+
+			I_num += mdot_face * nhat_x; // Increment numerator integral with contribution from current face, mdot'' * n_x * A_face = mdot * n_x
+			I_denom += nhat_x * nhat_x * A_face_mag; // Increment denominator integral with contribution from current face, n_x^2 * A_face
+		}
+	end_f_loop(f, t_fixed)
+
+	// Sum mdot over all compute nodes
+	mdot = PRF_GRSUM1(mdot);
 
 	// Sum integrals over all compute nodes
 	I_num = PRF_GRSUM1(I_num);
@@ -207,7 +229,6 @@ DEFINE_EXECUTE_AT_END(update_FSR_LSQ)
 	}
 
 }
-
 
 // Update Solid Motion 
 DEFINE_ZONE_MOTION(update_solid_motion, omega, axis, origin, velocity, current_time, dtime)
