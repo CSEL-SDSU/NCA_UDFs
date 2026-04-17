@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 static real V_f = 0; // Initialize flame spread rate variable, will be updated at end of each iteration in calc_FSR and used in inlet velocity profile and solid motion BCs
+static real alpha = 1; // Under-relaxation factor for FSR update, adjust as needed for stability and convergence speed
 
 /* CODE SECTION */
 /* FD INLET VELOCITY PROFILE */
@@ -188,7 +189,7 @@ DEFINE_EXECUTE_AT_END(update_FSR_LSQ)
 	end_f_loop(f, t)
 
 		// Add flux other reaction thread surface
-	begin_f_loop(f, t_fixed)
+		begin_f_loop(f, t_fixed)
 		if PRINCIPAL_FACE_P(f, t_fixed)
 		{
 			mdot_face = F_FLUX(f, t_fixed); // Mass flow from single face
@@ -206,8 +207,8 @@ DEFINE_EXECUTE_AT_END(update_FSR_LSQ)
 		}
 	end_f_loop(f, t_fixed)
 
-	// Sum mdot over all compute nodes
-	mdot = PRF_GRSUM1(mdot);
+		// Sum mdot over all compute nodes
+		mdot = PRF_GRSUM1(mdot);
 
 	// Sum integrals over all compute nodes
 	I_num = PRF_GRSUM1(I_num);
@@ -215,7 +216,10 @@ DEFINE_EXECUTE_AT_END(update_FSR_LSQ)
 
 	// Calculate corrected FSR and print result
 	//V_f = mdot_chem / (rho * I); // Calculate flame spread rate [m/s]
-	V_f = I_num / (rho * I_denom); // Calculate flame spread rate using least squares method [m/s]
+	double V_f_new = I_num / (rho * I_denom); // Calculate flame spread rate using least squares method [m/s]
+
+	// Apply under-relaxation
+	V_f = V_f + alpha * (V_f_new - V_f); // Update flame spread rate with under-relaxation factor of 0.5, adjust factor as needed for stability and convergence speed
 #endif
 
 	node_to_host_real_1(V_f); // update V_f on host process so report is correct.
@@ -255,4 +259,34 @@ DEFINE_PROFILE(update_wall_motion, thread, position)
 DEFINE_REPORT_DEFINITION_FN(flame_spread_rate)
 {
 	return V_f; // Return calculated flame spread rate for report definition
+}
+
+DEFINE_ON_DEMAND(check_rp_vars)
+{
+	bool U_mean_exists = RP_Variable_Exists_P("user/u_mean"); // Check if user-defined parameter for mean velocity exists
+	bool alpha_exists = RP_Variable_Exists_P("user/alpha"); // Check if user-defined parameter for under-relaxation factor exists
+
+	Message0("Checking for user-defined parameter 'user/u_mean': %d\n", U_mean_exists);
+	Message0("Checking for user-defined parameter 'user/alpha': %d\n", alpha_exists);
+
+	if (U_mean_exists)
+	{
+		real U_mean = RP_Get_Real("user/u_mean"); // Get mean velocity from user-defined parameter if it exists
+		Message0("User-defined parameter 'user/u_mean' found with value: %f m/s\n", U_mean);
+	}
+	else
+	{
+		Message0("Warning: User-defined parameter 'user/u_mean' not found.\n");
+	}
+
+	if (alpha_exists)
+	{
+		alpha = RP_Get_Real("user/alpha"); // Get under-relaxation factor from user-defined parameter if it exists
+		Message0("User-defined parameter 'user/alpha' found with value: %f\n", alpha);
+	}
+	else
+	{
+		Message0("Warning: User-defined parameter 'user/alpha' not found. Using default value: %f\n", alpha);
+	}
+
 }
