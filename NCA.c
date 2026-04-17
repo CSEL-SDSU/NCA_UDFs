@@ -41,7 +41,7 @@ DEFINE_PROFILE(inlet_x_vel_rpvar, thread, position)
 		Message0("Warning: User-defined parameter 'user/u_mean' not found. Using default value of %f m/s.\n", U_mean);
 	}
 
-	U_mean = +V_f; // Add calculated FSR to mean velocity for inlet profile
+	U_mean += V_f; // Add calculated FSR to mean velocity for inlet profile
 
 	U_max = U_mean * ((m + 1) / m) * ((n + 1) / n); /* m/sec; max velocity, at centerline... calc */
 
