@@ -294,7 +294,7 @@ DEFINE_ON_DEMAND(check_rp_vars)
 DEFINE_ON_DEMAND(set_FSR)
 {
 
-	bool V_f_init_exists = RP_VariableExists_P("user/V_f_init"); // Check if user-defined parameter for initial FSR exists)
+	bool V_f_init_exists = RP_Variable_Exists_P("user/V_f_init"); // Check if user-defined parameter for initial FSR exists)
 
 	Message0("Checking for user-defined parameter 'user/V_f_init': %d\n", V_f_init_exists);
 
