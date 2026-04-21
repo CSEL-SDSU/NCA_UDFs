@@ -290,3 +290,23 @@ DEFINE_ON_DEMAND(check_rp_vars)
 	}
 
 }
+
+DEFINE_ON_DEMAND(set_FSR)
+{
+
+	bool V_f_init_exists = RP_VariableExists_P("user/V_f_init"); // Check if user-defined parameter for initial FSR exists)
+
+	Message0("Checking for user-defined parameter 'user/V_f_init': %d\n", V_f_init_exists);
+
+	if (V_f_init_exists)
+	{
+		V_f = RP_Get_Real("user/V_f_init"); // Get initial FSR from user-defined parameter if it exists
+		Message0("User-defined parameter 'user/V_f_init' found with value: %g m/s\n", V_f);
+	}
+	else
+	{
+		V_f = 0.0; // Default initial FSR value if user-defined parameter does not exist
+		Message0("Warning: User-defined parameter 'user/V_f_init' not found. Using default value of 0 m/s.\n");
+	}
+	node_to_host_real_1(V_f); // update V_f on host process so report is correct.
+}
