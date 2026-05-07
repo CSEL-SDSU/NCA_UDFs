@@ -1,6 +1,7 @@
 
 #include "udf.h"
 #include <stdbool.h>
+#include "hdfio.h"
 
 static real V_f = 0; // Initialize flame spread rate variable, will be updated at end of each iteration in calc_FSR and used in inlet velocity profile and solid motion BCs
 static real alpha = 1; // Under-relaxation factor for FSR update, adjust as needed for stability and convergence speed
@@ -309,4 +310,40 @@ DEFINE_ON_DEMAND(set_FSR)
 		Message0("Warning: User-defined parameter 'user/v_f_init' not found. Using default value of 0 m/s.\n");
 	}
 	node_to_host_real_1(V_f); // update V_f on host process so report is correct.
+}
+
+DEFINE_RW_FILE(write_FSR, fp)
+{
+	Message0("Writing FSR to file: %g m/s\n", V_f);
+#if !RP_NODE
+	fprintf(fp, "%g", V_f); // Write FSR value to file
+#endif
+}
+
+DEFINE_RW_FILE(read_FSR, fp)
+{
+	Message0("Reading FSR from file...\n");
+#if !RP_NODE
+	fscanf(fp, "%g", &V_f);
+#endif
+}
+
+DEFINE_RW_HDF_FILE(write_FSR_hdf, filename)
+{
+
+	char* path = "/FSR_data"; // HDF5 dataset path for FSR data
+	real* data_ptr = &V_f; // Pointer to FSR data to write
+	size_t nelems = 1; // Number of elements to write (1 in this case since we're writing a single value)
+
+	Write_Complete_User_Dataset(filename, path, data_ptr, nelems);
+
+}
+
+DEFINE_RW_HDF_FILE(read_FSR_hdf, filename)
+{
+	char* path = "/FSR_data"; // HDF5 dataset path for flame spread rate data
+	real* data_ptr = &V_f; // Pointer to FSR variable to read into
+	size_t nelems = 1; // Number of elements to read (1 in this case since we're reading a single value)
+
+	Read_Complete_User_Dataset(filename, path, data_ptr, nelems);
 }
