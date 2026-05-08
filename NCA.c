@@ -2,9 +2,16 @@
 #include "udf.h"
 #include <stdbool.h>
 #include "hdfio.h"
+#include <math.h>
 
 static real V_f = 0; // Initialize flame spread rate variable, will be updated at end of each iteration in calc_FSR and used in inlet velocity profile and solid motion BCs
 static real alpha = 1; // Under-relaxation factor for FSR update, adjust as needed for stability and convergence speed
+
+// Temp based flame spread rate calculation variables
+static real R;
+static int eigen_face_zoneID = 0; // Zone ID of separated surface where temp is monitored
+static real Delta_Vf = 0.000001; // Initial change in FSR
+static const real T_infty = 300; // Ambient temperature [K]
 
 /* CODE SECTION */
 /* FD INLET VELOCITY PROFILE */
@@ -235,6 +242,63 @@ DEFINE_EXECUTE_AT_END(update_FSR_LSQ)
 
 }
 
+// Flame spread rate calculation based on eigenposition temperature
+DEFINE_EXECUTE_AT_END(calc_FSR_eigen)
+{
+	real T_eig;
+
+	// Find wall_mass_flux thread
+	Domain* d = Get_Domain(1); // Get domain pointer, update if different
+	Thread* t_fixed = Lookup_Thread(d, eigen_face_zoneID); //pointer to fixed temp surface 
+
+	face_t f;
+
+	real R_old = R; // Store old residual value 
+	real V_f_old = V_f; // Store old FSR value 
+
+#if !RP_HOST
+	begin_f_loop(f, t_fixed)
+		if PRINCIPAL_FACE_P(f, t_fixed)
+		{
+			T_eig = F_T(f, t_fixed); //Temperture at x(eig)
+		}
+	end_f_loop(f, t_fixed)
+
+
+	R = T_eig - 1.2 * T_infty; //Residual
+
+	if (R > 0)
+	{
+		V_f += Delta_Vf; // Increment FSR if residual is positive
+	}
+	else if(R < 0)
+	{
+		V_f -= Delta_Vf; // Decrement FSR if residual is negative
+		V_f = MAX(V_f, 0); // Ensure FSR does not become negative, floor at zero
+	}
+
+	// Compute new Delta_Vf using secant method
+	// There should be a custom convergence condition set for R so the divide by zero should not happen,
+	// but just incase. 
+	if (R != R_old) // Avoid division by zero
+	{
+		Delta_Vf = -R * (V_f - V_f_old) / (R - R_old); // Update Delta_Vf using secant method
+	}
+#endif
+
+	node_to_host_real_1(V_f); // update V_f on host process so report is correct.
+	node_to_host_real_1(Delta_Vf);
+	node_to_host_real_1(R);// update R on host process so report is correct for residual report definition
+
+	// Print Every 25 iterations to avoid excessive printing, update with different frequency if desired.
+	// Count figure out how to automatically pass the profile update interval (count find a macro or rp var for it)
+	if (N_ITER % 25 == 0)
+	{
+		Message0("Eigenvalue method Flame Spread Rate: %g m/s\n", V_f);
+		Message0("Eigenvalue method temperture Residual R: %g K\n", R);
+	}
+}
+
 // Update Solid Motion 
 DEFINE_ZONE_MOTION(update_solid_motion, omega, axis, origin, velocity, current_time, dtime)
 {
@@ -260,6 +324,12 @@ DEFINE_PROFILE(update_wall_motion, thread, position)
 DEFINE_REPORT_DEFINITION_FN(flame_spread_rate)
 {
 	return V_f; // Return calculated flame spread rate for report definition
+}
+
+// Report Definition for Residual of eigenvalue-based FSR calculation
+DEFINE_REPORT_DEFINITION_FN(residual_R)
+{
+	return R; // Return residual for report definition
 }
 
 DEFINE_ON_DEMAND(check_rp_vars)
@@ -311,6 +381,60 @@ DEFINE_ON_DEMAND(set_FSR)
 	}
 	node_to_host_real_1(V_f); // update V_f on host process so report is correct.
 }
+
+DEFINE_ON_DEMAND(set_eigen_face_zoneID)
+{
+	real T_eig;
+
+	bool zone_ID_exists = RP_Variable_Exists_P("user/eigen_zone_id"); // Check if user-defined parameter for eigen face zone ID exists
+	Message0("Checking for user-defined parameter 'user/eigen_zone_id': %d\n", zone_ID_exists);
+	if (zone_ID_exists)
+	{
+		eigen_face_zoneID = RP_Get_Integer("user/eigen_zone_id"); // Get eigen face zone ID from user-defined parameter if it exists
+		Message0("User-defined parameter 'user/eigen_zone_id' found with value: %d\n", eigen_face_zoneID);
+	}
+	else
+	{
+		eigen_face_zoneID = 0; // Default value if user-defined parameter does not exist, update with different default if desired
+		Message0("Warning: User-defined parameter 'user/eigen_zone_ID' not found. Using default value of 0.\n");
+	}
+	node_to_host_int_1(eigen_face_zoneID); // update eigen_face_zoneID on host process so it can be used in calc_FSR_eigen
+
+}
+
+DEFINE_INIT(init_R, d)
+{
+	// Find fixed temp thread
+	real T_eig;
+
+	if (eigen_face_zoneID == 0)
+	{
+		Message0("Error: eigen_face_zoneID is not set. Please set it using the 'user/eigen_zone_id' RP variable before initializing.\n");
+		Message0("Warning: Residual R for calc_FSR_eigen not initialized!\n");
+		return;
+	}
+
+	Thread* t_fixed = Lookup_Thread(d, eigen_face_zoneID); //pointer to fixed temp surface 
+
+	face_t f;
+
+#if !RP_HOST
+	begin_f_loop(f, t_fixed)
+		if PRINCIPAL_FACE_P(f, t_fixed)
+		{
+			T_eig = F_T(f, t_fixed); //Temperture at x(eig)
+			Message0("Initial temperature at eigenposition: %g K\n", T_eig);
+		}
+	end_f_loop(f, t_fixed)
+
+		R = T_eig - 1.2 * T_infty; //Residual
+
+#endif
+	node_to_host_real_1(R);	// update R on host process so it can be used in calc_FSR_eigen
+	Message0("Initialized and passed residual R = %g K to host node\n", R);
+	
+}
+
 
 DEFINE_RW_FILE(write_FSR, fp)
 {
