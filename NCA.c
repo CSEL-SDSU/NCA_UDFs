@@ -9,9 +9,13 @@ static real alpha = 1; // Under-relaxation factor for FSR update, adjust as need
 
 // Temp based flame spread rate calculation variables
 static real R;
+static real Vf_old;
+static real R_old;
+static real dR_by_dVf;
 static int eigen_face_zoneID = 0; // Zone ID of separated surface where temp is monitored
 static real Delta_Vf = 0.000001; // Initial change in FSR
 static const real T_infty = 300; // Ambient temperature [K]
+static bool converged_flag = false;
 
 /* CODE SECTION */
 /* FD INLET VELOCITY PROFILE */
@@ -245,16 +249,18 @@ DEFINE_EXECUTE_AT_END(update_FSR_LSQ)
 // Flame spread rate calculation based on eigenposition temperature
 DEFINE_EXECUTE_AT_END(calc_FSR_eigen)
 {
-	real T_eig;
+	real T_eig = 0.0; // initialize temperatuere as zero on all nodes
+	real dR;
+	real dVf;
 
-	// Find wall_mass_flux thread
+	// Find eigen position surface 
 	Domain* d = Get_Domain(1); // Get domain pointer, update if different
 	Thread* t_fixed = Lookup_Thread(d, eigen_face_zoneID); //pointer to fixed temp surface 
 
 	face_t f;
 
-	real R_old = R; // Store old residual value 
-	real V_f_old = V_f; // Store old FSR value 
+	//real R_old = R; // Store old residual value 
+	//real V_f_old = V_f; // Store old FSR value 
 
 #if !RP_HOST
 	begin_f_loop(f, t_fixed)
@@ -265,31 +271,37 @@ DEFINE_EXECUTE_AT_END(calc_FSR_eigen)
 	end_f_loop(f, t_fixed)
 
 
-	R = T_eig - 1.2 * T_infty; //Residual
-
-	if (R > 0)
-	{
-		V_f += Delta_Vf; // Increment FSR if residual is positive
-	}
-	else if(R < 0)
-	{
-		V_f -= Delta_Vf; // Decrement FSR if residual is negative
-		V_f = MAX(V_f, 0); // Ensure FSR does not become negative, floor at zero
-	}
-
-	// Compute new Delta_Vf using secant method
-	// There should be a custom convergence condition set for R so the divide by zero should not happen,
-	// but just incase. 
-	if (R != R_old) // Avoid division by zero
-	{
-		Delta_Vf = -R * (V_f - V_f_old) / (R - R_old); // Update Delta_Vf using secant method
-	}
+	//R = T_eig - 1.2 * T_infty; //Residual
 #endif
+	
+	// Sum temperature over compute nodes 
+	// T_eig will be zero on all compute nodes except on the one that the face belongs to
+	T_eig = PRF_GRSUM1(T_eig);
 
-	node_to_host_real_1(V_f); // update V_f on host process so report is correct.
-	node_to_host_real_1(Delta_Vf);
+	// Calculate Residual
+	R_old = R; // Set R_old to previous value
+	R = T_eig - 1.2 * T_infty; //calculate new R
+
+	//node_to_host_real_1(V_f); // update V_f on host process so report is correct.
+	//node_to_host_real_1(Delta_Vf);
 	node_to_host_real_1(R);// update R on host process so report is correct for residual report definition
 
+	//Calculate Derivative if iteration counter is greater than zero 
+	// otherwise old value is not valid
+	if (N_ITER != 0)
+	{
+		dR = R - R_old;
+		dVf = V_f - Vf_old;
+
+		dR_by_dVf = dR / dVf;
+		node_to_host_real_1(dR_by_dVf);
+	}
+
+	// Only converged if solution has been iterating enough and the temperature is within 1/1000th of a degree of the desired
+	if (N_ITER > 20000 && fabs(dR) < 0.001)
+	{
+		converged_flag = true;
+	}
 	// Print Every 25 iterations to avoid excessive printing, update with different frequency if desired.
 	// Count figure out how to automatically pass the profile update interval (count find a macro or rp var for it)
 	if (N_ITER % 25 == 0)
@@ -299,6 +311,51 @@ DEFINE_EXECUTE_AT_END(calc_FSR_eigen)
 	}
 }
 
+DEFINE_ADJUST(update_Vf_eigen,d)
+{
+
+#if !RP_HOST
+
+	if (N_ITER != 0)
+	{
+		V_f_old = V_f; // Save old V_f from previous iteration
+
+		// Calculate new V_f for this iteration
+		if (N_ITER == 1)
+		{
+			if (R > 0)
+			{
+				V_f = V_f_old + Delta_Vf; // Increment FSR if residual is positive/too hot
+			}
+			else if (R < 0)
+			{
+				V_f = V_f_old - Delta_Vf; // Decrement FSR if residual is negative/too cold
+				V_f = MAX(V_f, 0); // Ensure FSR does not become negative, floor at zero
+			}
+			else
+			{
+				V_f = V_f_old; // Keep FSR the same if residual is zero/converged
+				//Message0("FSR converged in one iteration!\n");
+				return;
+			}
+		}
+		else
+		{
+			if (!converged_flag)
+			{
+				V_f = V_f_old - R_old / (dR_by_dVf);
+			}
+			else
+			{
+				V_f = V_f_old; // Keep FSR the same if converged
+				Message0("FSR converged!\n");
+				return;
+			}
+		}
+	}
+#endif //!RP_HOST
+	node_to_host_real_1(V_f); // update V_f on host process so report is correct.
+}
 // Update Solid Motion 
 DEFINE_ZONE_MOTION(update_solid_motion, omega, axis, origin, velocity, current_time, dtime)
 {
@@ -384,7 +441,7 @@ DEFINE_ON_DEMAND(set_FSR)
 
 DEFINE_ON_DEMAND(set_eigen_face_zoneID)
 {
-	real T_eig;
+	//real T_eig;
 
 	bool zone_ID_exists = RP_Variable_Exists_P("user/eigen_zone_id"); // Check if user-defined parameter for eigen face zone ID exists
 	Message0("Checking for user-defined parameter 'user/eigen_zone_id': %d\n", zone_ID_exists);
@@ -402,6 +459,7 @@ DEFINE_ON_DEMAND(set_eigen_face_zoneID)
 
 }
 
+// I think this is old and is unused 
 DEFINE_INIT(init_R, d)
 {
 	// Find fixed temp thread
