@@ -27,6 +27,20 @@ static const int MIN_ITER_BEFORE_UPDATE = 1000;
 static int LSQ_mode = 1;
 static int newton_mode = 0;
 
+#define R_NP 1000
+#define R_HISTORY_SIZE (R_NP + 1)
+
+static real R_relative_tolerance = 1e-6;
+static real R_denominator_floor = 1e-12;
+
+static real R_history[R_HISTORY_SIZE];
+static int R_history_count = 0;
+static int R_history_head = 0;
+
+static real R_relative_residual_max = 1e20;
+
+
+
 static bool residuals_below(Domain *d, real threshold)
 {
     real scaled_res;
@@ -71,7 +85,102 @@ static bool residuals_below(Domain *d, real threshold)
 	return residuals_ok ? true : false;
 }
 
+// Function to clear the storage of R
+static void reset_R_history(void)
+{
+#if !RP_HOST
+	R_history_count = 0;
+	R_history_head = 0;
+	R_relative_residual_max = 1e20;
+#endif
+	node_to_host_int_2(R_history_count,R_history_head);
+	node_to_host_real_1(R_relative_residual_max);
+}
 
+// Function to write current R into R_history array
+static void store_R_in_history(real R_new)
+{
+#if !RP_HOST
+	R_history[R_history_head] = R_new;
+
+	R_history_head++;
+
+	// If we exceed the numeber of stored iterations, write the next one to the
+	// start of the array
+	if (R_history_head >= R_HISTORY_SIZE)
+	{
+		R_history_head = 0;
+	}
+
+	// if we have stored less than the storage size increase the count
+	// of stored R's 
+	if (R_history_count < R_HISTORY_SIZE)
+	{
+		R_history_count++;
+	}
+#endif
+
+	node_to_host_int_2(R_history_head,R_history_count);
+}
+
+// function to check R relative change. Determines whether the largest R
+// residual over the last 1000 iterations is less than the tolerance 
+static bool R_relative_change_below(real threshold)
+{
+	int R_converged = 0;
+
+#if !RP_HOST
+	int k; 
+	int idx_curr;
+	int idx_old;
+	real R_curr;
+	real denom;
+	real res_k;
+
+	R_relative_residual_max = 1e20;
+
+	// if we've counted enough values check for convergence 
+	if (R_history_count >= R_HISTORY_SIZE)
+	{
+
+		// Get the index to the current R. R_history_head always points to
+		// the next place to write so the one before it will be the current
+		idx_curr = R_history_head - 1;
+
+		//if were at the end of storage and the next place to write is idx =0,
+		// the current is the other end.
+		if (idx_curr < 0)
+		{
+			idx_curr += R_HISTORY_SIZE;
+		}
+
+		R_curr = R_history[idx_curr];
+
+		denom = MAX(fabs(R_curr), R_denominator_floor);
+
+		R_relative_residual_max = 0.0;
+
+		for (k = 1; k <= R_NP; k++)
+		{
+			idx_old = idx_curr - k;
+			while (idx_old < 0)
+			{
+				idx_old += R_HISTORY_SIZE;
+			}
+
+			res_k = fabs(R_curr - R_history[idx_old]) / denom;
+			R_relative_residual_max = MAX(R_relative_residual_max, res_k);
+		}
+
+		R_converged = (R_relative_residual_max < threshold);
+	}
+#endif
+
+	node_to_host_int_1(R_converged);
+	node_to_host_real_1(R_relative_residual_max);
+
+	return R_converged ? true : false;
+}
 
 /* typedef enum {
 	FSR_RAMP_FROM_BELOW = 0;
@@ -345,22 +454,36 @@ DEFINE_EXECUTE_AT_END(update_R)
 	T_eig = PRF_GRSUM1(T_eig);
 
 	// Calculate Residual
-	R = T_eig - 1.2 * T_infty; //calculate new R
-	node_to_host_real_1(R);// update R on host process so report is correct for residual report definition
+	R = T_eig - 1.2 * T_infty; // calculate new R
+	node_to_host_real_1(R);    // update R on host process so report is correct
 
-	Message0("NEWTON_ITER=%d, V_f = %g m/s, R = %f K\n",N_NEWTON_ITER, V_f, R);
+	store_R_in_history(R);
+
+	if (N_ITER % 25 == 0)
+	{
+		Message0("NEWTON_ITER=%d, V_f = %g m/s, R = %f K, R_rel_res_max = %g, R_hist_count = %d\n",
+				N_NEWTON_ITER, V_f, R, R_relative_residual_max, R_history_count);
+	}
 }
 
 DEFINE_EXECUTE_AT_END(update_FSR_newton)
 {
 	
+	
 	// Check residuals. Only do a newton update if R(V_f) has been safely evaluated.
-	Domain* d = Get_Domain(1); // Get domain pointer, update if different
+	//Domain* d = Get_Domain(1); // Get domain pointer, update if different
 
 	//if residuals are not below tolance or if enough iterations have not passed since last update, return
-	if (!residuals_below(d, residual_tolerance) || !((N_ITER - N_LAST_UPDATE) > MIN_ITER_BEFORE_UPDATE))
+	//if (!residuals_below(d, residual_tolerance) || !((N_ITER - N_LAST_UPDATE) > MIN_ITER_BEFORE_UPDATE))
+	//{
+	//	return; // Skip FSR update 
+	//}
+	// Only do a Newton update after R(V_f) has become stationary
+	// over the last R_NP iterations.
+	if (!R_relative_change_below(R_relative_tolerance) ||
+		!((N_ITER - N_LAST_UPDATE) > MIN_ITER_BEFORE_UPDATE))
 	{
-		return; // Skip FSR update 
+		return; // Skip FSR update
 	}
 
 	// When residuals are low enough using LSQ mode switch to newton mode
@@ -406,6 +529,8 @@ DEFINE_EXECUTE_AT_END(update_FSR_newton)
 
 			N_LAST_UPDATE = N_ITER; //Save iteration number of the update
 
+			reset_R_history();
+
 			Message0("NEWTON_ITER=%d, V_f = %g m/s. Updated V_f, solving R(V_f).\n ", N_NEWTON_ITER, V_f);
 			node_to_host_real_1(V_f);
 			node_to_host_int_1(N_NEWTON_ITER);
@@ -441,6 +566,8 @@ DEFINE_EXECUTE_AT_END(update_FSR_newton)
 			N_NEWTON_ITER++; 
 			
 			N_LAST_UPDATE = N_ITER; //Save iteration number of the update
+
+			reset_R_history();
 
 			node_to_host_real_1(V_f);
 			node_to_host_int_1(N_NEWTON_ITER);
@@ -489,7 +616,10 @@ DEFINE_REPORT_DEFINITION_FN(flame_spread_rate)
 	return V_f; // Return calculated flame spread rate for report definition
 }
 
-
+DEFINE_REPORT_DEFINITION_FN(residual_R_relative_change)
+{
+	return R_relative_residual_max;
+}
 DEFINE_ON_DEMAND(check_rp_vars)
 {
 	bool U_mean_exists = RP_Variable_Exists_P("user/u_mean"); // Check if user-defined parameter for mean velocity exists
