@@ -620,6 +620,7 @@ DEFINE_REPORT_DEFINITION_FN(residual_R_relative_change)
 {
 	return R_relative_residual_max;
 }
+
 DEFINE_ON_DEMAND(check_rp_vars)
 {
 	bool U_mean_exists = RP_Variable_Exists_P("user/u_mean"); // Check if user-defined parameter for mean velocity exists
@@ -653,6 +654,7 @@ DEFINE_ON_DEMAND(check_rp_vars)
 DEFINE_ON_DEMAND(set_FSR)
 {
 
+#if !RP_NODE // get the V_f value on from the host
 	bool V_f_init_exists = RP_Variable_Exists_P("user/v_f_init"); // Check if user-defined parameter for initial FSR exists)
 
 	Message0("Checking for user-defined parameter 'user/v_f_init': %d\n", V_f_init_exists);
@@ -667,7 +669,11 @@ DEFINE_ON_DEMAND(set_FSR)
 		V_f = 0.0; // Default initial FSR value if user-defined parameter does not exist
 		Message0("Warning: User-defined parameter 'user/v_f_init' not found. Using default value of 0 m/s.\n");
 	}
-	node_to_host_real_1(V_f); // update V_f on host process so report is correct.
+#endif
+
+	//node_to_host_real_1(V_f); // update V_f on host process so report is correct.
+	host_to_node_real_1(V_f); // broadcast V_f to nodes
+	Message0("FSR initialized to V_f = %g m/s \n", V_f);
 }
 
 /*=================================================================================
@@ -697,7 +703,7 @@ DEFINE_ON_DEMAND(set_FSR)
 DEFINE_ON_DEMAND(set_eigen_face_zoneID)
 {
 	//real T_eig;
-
+#if !RP_NODE //get desired value from host
 	bool zone_ID_exists = RP_Variable_Exists_P("user/eigen_zone_id"); // Check if user-defined parameter for eigen face zone ID exists
 	Message0("Checking for user-defined parameter 'user/eigen_zone_id': %d\n", zone_ID_exists);
 	if (zone_ID_exists)
@@ -710,8 +716,11 @@ DEFINE_ON_DEMAND(set_eigen_face_zoneID)
 		eigen_face_zoneID = 0; // Default value if user-defined parameter does not exist, update with different default if desired
 		Message0("Warning: User-defined parameter 'user/eigen_zone_id' not found. Using default value of 0.\n");
 	}
-	node_to_host_int_1(eigen_face_zoneID); // update eigen_face_zoneID on host process so it can be used in calc_FSR_eigen
+#endif
+	//node_to_host_int_1(eigen_face_zoneID); // update eigen_face_zoneID on host process so it can be used in calc_FSR_eigen
+	host_to_node_int_1(eigen_face_zoneID); //broadcast variable to nodes
 
+	Message0("eigen_face_zoneID initialized to %d \n", eigen_face_zoneID);
 }
 
 DEFINE_ON_DEMAND(residual_list)
