@@ -9,23 +9,11 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (
-	(quartz solid
-		(chemical-formula . sio2)
-		(density (constant . 2203.))
-		(specific-heat (constant . 1000.))
-		(thermal-conductivity (polynomial 1.403 -0.00084106 2.9863e-06 -1.1832e-09) (constant . 16.27))
-		(atomic-number (constant . 26))
-		(electric-conductivity (constant . 8330000.))
-		(magnetic-permeability (constant . 1.257e-06))
-		(struct-youngs-modulus (constant . 209000000000.))
-		(struct-poisson-ratio (constant . 0.3))
-	)
-
 	(mma_comb_mix mixture
 		(chemical-formula . #f)
 		(species (names (c5o2h8 h2o co2 o2 n2) (c5h8o2-n) ()))
 		(reactions (finite-rate ("pyrolysis" ((c5h8o2-n 1. 0. 1)) ((c5o2h8 1. 0. 1)) ((h2o 0. 1) (co2 0. 1) (o2 1. 1) (n2 0 1)) (stoichiometry 1c5h8o2-n --> 1c5o2h8) (arrhenius 8500000000000. 188000000. 0.) (surface-reaction? . #t)) ("mma-combustion" ((c5o2h8 1. 1. 1) (o2 6. 1. 1)) ((h2o 4. 0. 1) (co2 5. 0. 1)) ((n2 0 1)) (stoichiometry 1c5o2h8 + 6o2 --> 4h2o + 5co2) (arrhenius 8920000000. 88948520. 0.))) (eddy-dissipation ("pyrolysis" ((c5h8o2-n 1. 0. 1)) ((c5o2h8 1. 0. 1)) ((h2o 0. 1) (co2 0. 1) (o2 1. 1) (n2 0 1)) (stoichiometry 1c5h8o2-n --> 1c5o2h8) (arrhenius 8500000000000. 188000000. 0.) (surface-reaction? . #t)) ("mma-combustion" ((c5o2h8 1. 1. 1) (o2 6. 1. 1)) ((h2o 4. 0. 1) (co2 5. 0. 1)) ((n2 0 1)) (stoichiometry 1c5o2h8 + 6o2 --> 4h2o + 5co2) (arrhenius 8920000000. 88948520. 0.))) (finite-rate/eddy-dissipation ("pyrolysis" ((c5h8o2-n 1. 0. 1)) ((c5o2h8 1. 0. 1)) ((h2o 0. 1) (co2 0. 1) (o2 1. 1) (n2 0 1)) (stoichiometry 1c5h8o2-n --> 1c5o2h8) (arrhenius 8500000000000. 188000000. 0.) (surface-reaction? . #t)) ("mma-combustion" ((c5o2h8 1. 1. 1) (o2 6. 1. 1)) ((h2o 4. 0. 1) (co2 5. 0. 1)) ((n2 0 1)) (stoichiometry 1c5o2h8 + 6o2 --> 4h2o + 5co2) (arrhenius 8920000000. 88948520. 0.))))
-		(reaction-mechs (reaction-mechs ("pyrolysis only" (reaction-type . wall-surface) (reaction-list "pyrolysis") (site-info)) ("combustion-only" (reaction-type . volumetric) (reaction-list "mma-combustion") (site-info)) ("pyro-and-comb" (reaction-type . all) (reaction-list "mma-combustion" "pyrolysis") (site-info))))
+		(reaction-mechs (reaction-mechs ("pyrolysis only" (reaction-type . wall-surface) (reaction-list "pyrolysis") (site-info)) ("combustion-only" (reaction-type . volumetric) (reaction-list "mma-combustion") (site-info)) ("pyro-and-comb" (reaction-type . all) (reaction-list "pyrolysis" "mma-combustion") (site-info))))
 		(density (incompressible-ideal-gas . #f) (ideal-gas . #f))
 		(specific-heat (mixing-law . #f))
 		(thermal-conductivity (ideal-gas-mixing-law . #f) (constant . 0.0242))
@@ -204,7 +192,7 @@
 	(pmma solid
 		(chemical-formula . #f)
 		(density (constant . 1190.))
-		(specific-heat (constant . 1400.) (polynomial nasa-9-piecewise-polynomial (200. 1000. 1542807. 5735.686 743.4314000000001 0.06124886 -7.495425e-05 4.740278e-08 -1.215476e-11) (1000. 6000. -9000630. 35984.76 726.2905 0.0238426 -4.71308e-06 -3.072811e-10 1.557189e-13) (6000. 20000. -155330700000. 117170100. -33352.98 4.774677 -0.0003297569 1.106924e-08 -1.447104e-13)))
+		(specific-heat (polynomial nasa-9-piecewise-polynomial (200. 1000. 1542807. 5735.686 743.4314000000001 0.06124886 -7.495425e-05 4.740278e-08 -1.215476e-11) (1000. 6000. -9000630. 35984.76 726.2905 0.0238426 -4.71308e-06 -3.072811e-10 1.557189e-13) (6000. 20000. -155330700000. 117170100. -33352.98 4.774677 -0.0003297569 1.106924e-08 -1.447104e-13)) (constant . 1400.))
 		(atomic-number (constant . 13))
 		(thermal-conductivity (constant . 0.19))
 		(formation-entropy (constant . 164448.08))
@@ -213,6 +201,18 @@
 		(magnetic-permeability (constant . 1.257e-06))
 		(struct-youngs-modulus (constant . 70000000000.))
 		(struct-poisson-ratio (constant . 0.32))
+	)
+
+	(quartz solid
+		(chemical-formula . sio2)
+		(density (constant . 2203.))
+		(specific-heat (constant . 700.))
+		(thermal-conductivity (polynomial 1.403 -0.00084106 2.9863e-06 -1.1832e-09) (constant . 16.27))
+		(atomic-number (constant . 26))
+		(electric-conductivity (constant . 8330000.))
+		(magnetic-permeability (constant . 1.257e-06))
+		(struct-youngs-modulus (constant . 209000000000.))
+		(struct-poisson-ratio (constant . 0.3))
 	)
 
 )

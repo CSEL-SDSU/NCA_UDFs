@@ -7,7 +7,7 @@ GX=${GX:-0}
 GY=${GY:-9.81}
 
 # To run: ./submit_fluent.sh [run name] [case file] 
-# inside the directory with the case file and the NCA.c file
+# inside the directory with the case file and the NCA_unix.c file
 # make executable by doing chmod +x submit_fluent.sh
 # Optional environment overrides:
 #   FLUENT_NTASKS=8 ./submit_fluent.sh run1 SYS-4.cas.h5
@@ -15,7 +15,7 @@ GY=${GY:-9.81}
 NTASKS=${FLUENT_NTASKS:-8}
 TIME_LIMIT=${FLUENT_TIME:-24:00:00}
 PARTITION=${FLUENT_PARTITION:-engineering}
-MEM_PER_CPU=${FLUENT_MEM_PER_CPU:-2500}
+MEM_PER_CPU=${FLUENT_MEM_PER_CPU:-1000}
 
 SUBMIT_DIR=$(pwd)
 CASE_ABS=$(readlink -f "$CASE")
@@ -32,9 +32,9 @@ if [[ ! -f "$CASE_ABS" ]]; then
     exit 1
 fi
 
-if [[ ! -f "NCA.c" ]]; then
-    echo "Error: NCA.c not found in current directory: $SUBMIT_DIR" >&2
-    echo "Run this script from the directory containing NCA.c and your Fluent files." >&2
+if [[ ! -f "NCA_unix.c" ]]; then
+    echo "Error: NCA_unx.c not found in current directory: $SUBMIT_DIR" >&2
+    echo "Run this script from the directory containing NCA_unix.c and your Fluent files." >&2
     exit 1
 fi
 
@@ -47,7 +47,7 @@ mkdir -p "$NEW_FOLDER"
 cd "$NEW_FOLDER"
 
 cp "$CASE_ABS" .
-cp ../NCA.c .
+cp ../NCA_unix.c .
 
 cat > "$JOU" <<EOF
 ;;; Solution Journal Script for running the NCA Fluent model in batch mode
@@ -58,7 +58,7 @@ cat > "$JOU" <<EOF
 ;;; Gravity: GX=${GX}, GY=${GY}
 
 ;; ------Compile and load UDF------------------------------------------------------
-/define/user-defined/compiled-functions compile "lib_inlet_fsr" yes "NCA.c" "" ""
+/define/user-defined/compiled-functions compile "lib_inlet_fsr" yes "NCA_unix.c" "" ""
 /define/user-defined/compiled-functions load "lib_inlet_fsr"
 
 ;; ------Read case file------------------------------------------------------------
@@ -77,13 +77,27 @@ cat > "$JOU" <<EOF
 /solve/patch () newbig () temperature 1900
 /solve/patch () downstream () species-3 0
 
+;; UDF setup
+/define/user-defined/execute-on-demand "check_u_mean::lib_inlet_fsr"
+
+(rp-var-define 'user/v_f_init 0 'real #f)
+/define/user-defined/execute-on-demand "set_FSR::lib_inlet_fsr"
+
+(rp-var-define 'user/alpha 0.5 'real #f)
+/define/user-defined/execute-on-demand "set_alpha::lib_inlet_fsr"
+
 ;; ------Solve---------------------------------------------------------------------
+;;/solve/iterate 100 
 /solve/iterate 75000
 
 ;; ------Write output case and data -----------------------------------------------
 /file/write-case-data "${FINAL_CASE_DATA}"
 
+/file/export/cgns "${FINAL_CASE_DATA}" full-domain yes yes x-coordinate y-coordinate c5h8o2-n-deposition-rate cell-id cell-volume co2 h2o n2 o2 c5h8o2 dco2-dx dco2-dy dh2o-dx dh2o-dy dn2-dx dn2-dy do2-dx do2-dy dc5o2h8-dx dc5o2h8-dy density dt-dx dt-dy heat-flux pressure rad-heat-flux recon-dp-dx recon-dp-dy recon-dt-dx recon-dt-dy recon-dx-velocity-dx recon-dx-velocity-dy recon-dy-velocity-dx recon-dy-velocity-dy surf-incident-radiation surf-kinetic-rate-reaction-1 temperature thermal-conductivity-lam thermal-diffc5o2h8 thermal-diffco2 thermal-diffh2o thermal-diffn2 thermal-diffo2 vol-kinetic-rate-reaction-2 x-face-area y-face-area ()
+
 /parallel/timer/usage
+
+/report/summary no
 
 /exit yes
 EOF
