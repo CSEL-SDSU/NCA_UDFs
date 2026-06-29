@@ -87,13 +87,13 @@ cat > "$JOU" <<EOF
 /define/user-defined/execute-on-demand "set_alpha::lib_inlet_fsr"
 
 ;; ------Solve---------------------------------------------------------------------
-;;/solve/iterate 100 
+;;/solve/iterate 50 
 /solve/iterate 75000
 
 ;; ------Write output case and data -----------------------------------------------
 /file/write-case-data "${FINAL_CASE_DATA}"
 
-/file/export/cgns "${FINAL_CASE_DATA}" full-domain yes yes x-coordinate y-coordinate c5h8o2-n-deposition-rate cell-id cell-volume co2 h2o n2 o2 c5h8o2 dco2-dx dco2-dy dh2o-dx dh2o-dy dn2-dx dn2-dy do2-dx do2-dy dc5o2h8-dx dc5o2h8-dy density dt-dx dt-dy heat-flux pressure rad-heat-flux recon-dp-dx recon-dp-dy recon-dt-dx recon-dt-dy recon-dx-velocity-dx recon-dx-velocity-dy recon-dy-velocity-dx recon-dy-velocity-dy surf-incident-radiation surf-kinetic-rate-reaction-1 temperature thermal-conductivity-lam thermal-diffc5o2h8 thermal-diffco2 thermal-diffh2o thermal-diffn2 thermal-diffo2 vol-kinetic-rate-reaction-2 x-face-area y-face-area ()
+/file/export/cgns "${FINAL_CASE_DATA}" full-domain yes yes x-coordinate y-coordinate c5h8o2-n-deposition-rate cell-id cell-volume co2 h2o n2 o2 c5o2h8 dco2-dx dco2-dy dh2o-dx dh2o-dy dn2-dx dn2-dy do2-dx do2-dy dc5o2h8-dx dc5o2h8-dy density dt-dx dt-dy heat-flux pressure rad-heat-flux recon-dp-dx recon-dp-dy recon-dt-dx recon-dt-dy recon-dx-velocity-dx recon-dx-velocity-dy recon-dy-velocity-dx recon-dy-velocity-dy surf-incident-radiation surf-kinetic-rate-reaction-1 temperature thermal-conductivity-lam thermal-diffc5o2h8 thermal-diffco2 thermal-diffh2o thermal-diffn2 thermal-diffo2 vol-kinetic-rate-reaction-2 x-face-area y-face-area x-velocity y-velocity specific-heat-cp ()
 
 /parallel/timer/usage
 

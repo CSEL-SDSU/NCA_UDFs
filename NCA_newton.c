@@ -13,7 +13,7 @@ static real V_f_old;
 static real R_old;
 static real dR_by_dVf;
 static int eigen_face_zoneID = 0; // Zone ID of separated surface where temp is monitored
-static real Delta_Vf = 0.000010; // Initial change in FSR
+static real Delta_Vf = 0.000010; // Initial change in FSR, 10 um/s
 static const real T_infty = 300; // Ambient temperature [K]
 
 static real residual_tolerance = 1e-6; // Residual tolerance for accepting a given R(V_f) in false position method, adjust as needed
@@ -30,7 +30,7 @@ static int newton_mode = 0;
 #define R_NP 1000
 #define R_HISTORY_SIZE (R_NP + 1)
 
-static real R_relative_tolerance = 1e-6;
+static real R_relative_tolerance = 1e-4;
 static real R_denominator_floor = 1e-12;
 
 static real R_history[R_HISTORY_SIZE];
@@ -88,7 +88,7 @@ static bool residuals_below(Domain *d, real threshold)
 // Function to clear the storage of R
 static void reset_R_history(void)
 {
-#if !RP_HOST
+#if !RP_HOST // run on compute nodes in parallel, and single process in serial
 	R_history_count = 0;
 	R_history_head = 0;
 	R_relative_residual_max = 1e20;
@@ -100,7 +100,7 @@ static void reset_R_history(void)
 // Function to write current R into R_history array
 static void store_R_in_history(real R_new)
 {
-#if !RP_HOST
+#if !RP_HOST //Store R in history. Stored on compute nodes in parallel
 	R_history[R_history_head] = R_new;
 
 	R_history_head++;
@@ -120,7 +120,10 @@ static void store_R_in_history(real R_new)
 	}
 #endif
 
+	//Update node values (should be same on all nodes to host)
 	node_to_host_int_2(R_history_head,R_history_count);
+	node_to_host_real(R_history, R_HISTORY_SIZE);
+
 }
 
 // function to check R relative change. Determines whether the largest R
@@ -129,7 +132,7 @@ static bool R_relative_change_below(real threshold)
 {
 	int R_converged = 0;
 
-#if !RP_HOST
+#if !RP_HOST // Run this on compute nodes in parallel or single process in serial
 	int k; 
 	int idx_curr;
 	int idx_old;
@@ -176,6 +179,7 @@ static bool R_relative_change_below(real threshold)
 	}
 #endif
 
+	// Pass node values to host. Should be the same on all nodes if in parallel
 	node_to_host_int_1(R_converged);
 	node_to_host_real_1(R_relative_residual_max);
 
@@ -347,9 +351,9 @@ DEFINE_EXECUTE_AT_END(update_FSR_LSQ)
 	real I_num = 0;
 	real I_denom = 0;
 
-	face_t f; // Face along surface
+	
 
-#if !RP_HOST
+#if !RP_HOST // Runs on compute nodes in parallel and single process in serial 
 	// Find wall_mass_flux thread
 	Domain* d = Get_Domain(1); // Get domain pointer, update if different
 	int zone_ID = 5; // ID of surface zone where chemical reaction occurs, update if different. Zone is shown in Boundary conditions tab
@@ -357,6 +361,8 @@ DEFINE_EXECUTE_AT_END(update_FSR_LSQ)
 
 	Thread* t = Lookup_Thread(d, zone_ID); // Get thread pointer for surface zone where chemical reaction occurs
 	Thread* t_fixed = Lookup_Thread(d, zone_fixed_ID); //pointer to fixed temp surface 
+
+	face_t f; // Face along surface
 
 	// Loop through faces along surface and sum mass flux from chemical reaction
 	begin_f_loop(f, t)
@@ -400,8 +406,8 @@ DEFINE_EXECUTE_AT_END(update_FSR_LSQ)
 		}
 	end_f_loop(f, t_fixed)
 
-		// Sum mdot over all compute nodes
-		mdot = PRF_GRSUM1(mdot);
+	// Sum mdot over all compute nodes
+	mdot = PRF_GRSUM1(mdot);
 
 	// Sum integrals over all compute nodes
 	I_num = PRF_GRSUM1(I_num);
@@ -417,13 +423,16 @@ DEFINE_EXECUTE_AT_END(update_FSR_LSQ)
 
 	node_to_host_real_1(V_f); // update V_f on host process so report is correct.
 
+	// Report from host in parallel or single process in serial
+#if !RP_NODE
 	// Print Every 25 iterations to avoid excessive printing, update with different frequency if desired.
 	// Count figure out how to automatically pass the profile update interval (count find a macro or rp var for it)
 	if (N_ITER % 25 == 0)
 	{
-		Message0("Mass flow at surface: %g kg/s\n", mdot);
-		Message0("LSQ Calculated Flame Spread Rate: %g m/s\n", V_f);
+		Message("Mass flow at surface: %g kg/s\n", mdot);
+		Message("LSQ Calculated Flame Spread Rate: %g m/s\n", V_f);
 	}
+#endif
 
 }
 
@@ -431,45 +440,85 @@ DEFINE_EXECUTE_AT_END(update_FSR_LSQ)
 //Will be executed every iteration
 DEFINE_EXECUTE_AT_END(update_R)
 {
+	//real T_eig_sum = 0.0;
+	real T_eig = 0.0;
+	int n_eig_faces = 0;
+
+#if !RP_HOST //will run on all compute nodes or in serial
+
+	// Domain, thread, and face variables are not availible on the host
 	Domain* d = Get_Domain(1); // Get domain pointer, update if different
 
 	// Calculate R(V_f)
-	real T_eig = 0.0; // initialize temperatuere as zero on all nodes
+	//real T_eig = 0.0; // initialize temperatuere as zero on all nodes
 
 	Thread* t_fixed = Lookup_Thread(d, eigen_face_zoneID); //pointer to fixed temp surface 
 
 	face_t f;
 
-#if !RP_HOST
 	begin_f_loop(f, t_fixed)
 		if PRINCIPAL_FACE_P(f, t_fixed)
 		{
 			T_eig = F_T(f, t_fixed); //Temperture at x(eig)
+			n_eig_faces++;
 		}
 	end_f_loop(f, t_fixed)
 #endif
 	
 	// Sum temperature over compute nodes 
 	// T_eig will be zero on all compute nodes except on the one that the face belongs to
+#if RP_NODE //only needed in parallel. Will only run in parallel
 	T_eig = PRF_GRSUM1(T_eig);
+	n_eig_faces = PRF_GISUM1(n_eig_faces);
+#endif
 
-	// Calculate Residual
-	R = T_eig - 1.2 * T_infty; // calculate new R
-	node_to_host_real_1(R);    // update R on host process so report is correct
+	// Calculate Residual. Use synced T_eig value if parallel. Do not run on host if in parallel b/c host has T_eig = 0
+#if !RP_HOST
+	R = T_eig - 1.2 * T_infty;
+#endif
 
+	// update R, T_eig, and face count on host process so report is correct
+	node_to_host_real_2(R,T_eig);    
+	node_to_host_int_1(n_eig_faces);
+
+	// Store R
 	store_R_in_history(R);
+
+	// Report using host process or single serial process 
+#if !RP_NODE
+	if (n_eig_faces != 1 && N_ITER % 25 == 0)
+	{
+		Message("Warning: eigen face zone %d has %d principal faces. T_eig = %f K\n",
+			eigen_face_zoneID, n_eig_faces, T_eig);
+	}
 
 	if (N_ITER % 25 == 0)
 	{
-		Message0("NEWTON_ITER=%d, V_f = %g m/s, R = %f K, R_rel_res_max = %g, R_hist_count = %d\n",
-				N_NEWTON_ITER, V_f, R, R_relative_residual_max, R_history_count);
+		Message("NEWTON_ITER=%d, V_f = %g m/s, T_eig = %g K, R = %f K, "
+			"R_rel_res_max = %g, R_hist_count = %d\n",
+			N_NEWTON_ITER, V_f, T_eig, R,
+			R_relative_residual_max, R_history_count);
 	}
+#endif
+}
+
+static void broadcast_newton_state_from_host(void)
+{
+	host_to_node_real_1(V_f);
+	host_to_node_real_1(V_f_old);
+	host_to_node_real_1(R_old);
+	host_to_node_real_1(dR_by_dVf);
+
+	host_to_node_int_1(N_NEWTON_ITER);
+	host_to_node_int_1(N_LAST_UPDATE);
+	host_to_node_int_1(LSQ_mode);
+	host_to_node_int_1(newton_mode);
 }
 
 DEFINE_EXECUTE_AT_END(update_FSR_newton)
 {
-	
-	
+	// Do the calculation 
+
 	// Check residuals. Only do a newton update if R(V_f) has been safely evaluated.
 	//Domain* d = Get_Domain(1); // Get domain pointer, update if different
 
@@ -480,29 +529,50 @@ DEFINE_EXECUTE_AT_END(update_FSR_newton)
 	//}
 	// Only do a Newton update after R(V_f) has become stationary
 	// over the last R_NP iterations.
-	if (!R_relative_change_below(R_relative_tolerance) ||
-		!((N_ITER - N_LAST_UPDATE) > MIN_ITER_BEFORE_UPDATE))
+	int R_is_stationary = 0;
+	int enough_iters_since_update = 0;
+	int did_update = 0;
+	int return_flag = 0;
+
+	R_is_stationary = R_relative_change_below(R_relative_tolerance);
+
+#if !RP_NODE //run on host in parallel or on single process in serial
+	enough_iters_since_update = ((N_ITER - N_LAST_UPDATE) > MIN_ITER_BEFORE_UPDATE);
+
+	if (!R_is_stationary ||	!enough_iters_since_update)
 	{
-		return; // Skip FSR update
+		return_flag = 1;
+		//return; // Skip FSR update
 	}
+#endif 
+
+	host_to_node_int_1(return_flag);
+
+	// if return flage was hit, return on all nodes
+	if (return_flag)
+	{
+		return;
+	}
+
+#if !RP_NODE
 
 	// When residuals are low enough using LSQ mode switch to newton mode
 	if (N_NEWTON_ITER == 0 && LSQ_mode)
 	{
 		LSQ_mode = 0; // Turn off LSQ mode so it doesn't interfere with Newton updates
-		newton_mode = 1; // Turn on Newton mode to allow for Newton updates in this function
+		newton_mode = 1; // Turn on Newton mode to allow for Newton updates in this function	
 
-		// Update state flages on host nodes. This function runs on compute nodes
-		node_to_host_int_1(LSQ_mode); 
-		node_to_host_int_1(newton_mode);
-
-		Message0("Switching from LSQ to Newton. V_f = %g m/s\n", V_f);
+		Message("Switching from LSQ to Newton. V_f = %g m/s\n", V_f);
 	}
+#endif
+
+	// Update state flages on nodes. 
+	host_to_node_int_2(LSQ_mode, newton_mode);
 
 	//V_f(1) and R(1) stored in V_f and R.
 	//V_f(0) and R(0) stored in V_f_old and R_old
 
-
+#if !RP_NODE
 	if (newton_mode)
 	{
 		//V_f_old = V_f;
@@ -520,8 +590,8 @@ DEFINE_EXECUTE_AT_END(update_FSR_newton)
 			
 			V_f_old = V_f;
 			R_old = R; 
-			node_to_host_real_1(V_f_old);
-			node_to_host_real_1(R_old);
+			//node_to_host_real_1(V_f_old);
+			//node_to_host_real_1(R_old);
 
 			// V_f(1) = V_f(0) + deltaV_f
 			V_f += Delta_Vf;
@@ -529,13 +599,17 @@ DEFINE_EXECUTE_AT_END(update_FSR_newton)
 
 			N_LAST_UPDATE = N_ITER; //Save iteration number of the update
 
-			reset_R_history();
+			// Reset R doesnt run on host
+			//reset_R_history();
+			did_update = 1; //flag to run reset R at end
 
-			Message0("NEWTON_ITER=%d, V_f = %g m/s. Updated V_f, solving R(V_f).\n ", N_NEWTON_ITER, V_f);
-			node_to_host_real_1(V_f);
-			node_to_host_int_1(N_NEWTON_ITER);
-			node_to_host_int_1(N_LAST_UPDATE);
-			return;
+			//broadcast_newton_state_from_host();
+			Message("NEWTON_ITER=%d, V_f = %g m/s. Updated V_f, solving R(V_f).\n ", N_NEWTON_ITER, V_f);
+
+			//update done from broadcast helper 
+			//node_to_host_real_1(V_f);
+			//node_to_host_int_2(N_NEWTON_ITER,N_LAST_UPDATE);
+			//return;
 		}
 		else
 		{
@@ -548,44 +622,60 @@ DEFINE_EXECUTE_AT_END(update_FSR_newton)
 
 			// make sure derivative is not zero (in that case procedure fails)
 			if (fabs(dR_by_dVf) < 1e-12) { 
-				Message0("Warning: Newton procedure failed dR_by_dVf = %g \n",dR_by_dVf);
+				Message("Warning: Newton procedure failed dR_by_dVf = %g \n",dR_by_dVf);
 				newton_mode=0;  
-				node_to_host_int_1(newton_mode);
-				return;
+				//broadcast_newton_state_from_host();
+				//node_to_host_int_1(newton_mode);
+				return_flag = 1;
+				//return;
 			}
 			
-			// Save old values for the next iteration
-			V_f_old = V_f;
-			R_old = R;
-			node_to_host_real_1(V_f_old);
-			node_to_host_real_1(R_old);
-
-			// Update V_f 
-			// V_f(n+1) = R(n)*( (V_f(n)) - V_f(n-1))/(R(n) - R(n-1)) )
-			V_f = V_f_old - R / dR_by_dVf; 
-			N_NEWTON_ITER++; 
-			
-			N_LAST_UPDATE = N_ITER; //Save iteration number of the update
-
-			reset_R_history();
-
-			node_to_host_real_1(V_f);
-			node_to_host_int_1(N_NEWTON_ITER);
-			node_to_host_int_1(N_LAST_UPDATE);
-
-			Message0("NEWTON_ITER=%d, V_f = %g m/s. Updated V_f, solving R(V_f).\n ", N_NEWTON_ITER, V_f);
-
-			if (fabs(V_f - V_f_old) <= relative_change_V_f)
+			if (!return_flag)
 			{
-				Message0("Change in V_f is only 1 um/s. Procedure completed successfully. NEWTON_ITER=%d, V_f = %g m/s \n", N_NEWTON_ITER, V_f);
-				newton_mode = 0;
-				node_to_host_int_1(newton_mode);
-				return;
-			}
+				// Save old values for the next iteration
+				V_f_old = V_f;
+				R_old = R;
+				//broadcast_newton_state_from_host();
+				//node_to_host_real_2(V_f_old, R_old);
 
-			Message0("NEWTON_ITER=%d, V_f = %g m/s. Updated V_f, solving R(V_f).\n ", N_NEWTON_ITER, V_f);
+				// Update V_f 
+				// V_f(n+1) = R(n)*( (V_f(n)) - V_f(n-1))/(R(n) - R(n-1)) )
+				V_f = V_f_old - R / dR_by_dVf;
+				N_NEWTON_ITER++;
 
+				N_LAST_UPDATE = N_ITER; //Save iteration number of the update
+
+				did_update = 1;
+				//reset_R_history();
+
+				//broadcast_newton_state_from_host();
+
+				//node_to_host_real_1(V_f);
+				//node_to_host_int_2(N_NEWTON_ITER, N_LAST_UPDATE);
+
+				Message("NEWTON_ITER=%d, V_f = %g m/s. Updated V_f, solving R(V_f).\n ", N_NEWTON_ITER, V_f);
+
+				if (fabs(V_f - V_f_old) <= relative_change_V_f)
+				{
+					Message("Change in V_f is only 1 um/s. Procedure completed successfully. NEWTON_ITER=%d, V_f = %g m/s \n", N_NEWTON_ITER, V_f);
+					newton_mode = 0;
+					//broadcast_newton_state_from_host();
+					//node_to_host_int_1(newton_mode);
+					//return;
+				}
+
+				//Message("NEWTON_ITER=%d, V_f = %g m/s. Updated V_f, solving R(V_f).\n ", N_NEWTON_ITER, V_f);
+			}		
 		}
+	}
+#endif
+
+	host_to_node_int_1(did_update);
+	broadcast_newton_state_from_host();
+
+	if (did_update)
+	{
+		reset_R_history();
 	}
 }
 
@@ -620,7 +710,6 @@ DEFINE_REPORT_DEFINITION_FN(residual_R_relative_change)
 {
 	return R_relative_residual_max;
 }
-
 DEFINE_ON_DEMAND(check_rp_vars)
 {
 	bool U_mean_exists = RP_Variable_Exists_P("user/u_mean"); // Check if user-defined parameter for mean velocity exists
@@ -654,26 +743,27 @@ DEFINE_ON_DEMAND(check_rp_vars)
 DEFINE_ON_DEMAND(set_FSR)
 {
 
-#if !RP_NODE // get the V_f value on from the host
+#if !RP_NODE
+
 	bool V_f_init_exists = RP_Variable_Exists_P("user/v_f_init"); // Check if user-defined parameter for initial FSR exists)
 
-	Message0("Checking for user-defined parameter 'user/v_f_init': %d\n", V_f_init_exists);
+	Message("Checking for user-defined parameter 'user/v_f_init': %d\n", V_f_init_exists);
 
 	if (V_f_init_exists)
 	{
 		V_f = RP_Get_Real("user/v_f_init"); // Get initial FSR from user-defined parameter if it exists
-		Message0("User-defined parameter 'user/v_f_init' found with value: %g m/s\n", V_f);
+		Message("User-defined parameter 'user/v_f_init' found with value: %g m/s\n", V_f);
 	}
 	else
 	{
 		V_f = 0.0; // Default initial FSR value if user-defined parameter does not exist
-		Message0("Warning: User-defined parameter 'user/v_f_init' not found. Using default value of 0 m/s.\n");
+		Message("Warning: User-defined parameter 'user/v_f_init' not found. Using default value of 0 m/s.\n");
 	}
 #endif
 
 	//node_to_host_real_1(V_f); // update V_f on host process so report is correct.
-	host_to_node_real_1(V_f); // broadcast V_f to nodes
-	Message0("FSR initialized to V_f = %g m/s \n", V_f);
+	host_to_node_real_1(V_f);
+	Message("V_f initialized to %g m/s \n",V_f);
 }
 
 /*=================================================================================
@@ -703,30 +793,32 @@ DEFINE_ON_DEMAND(set_FSR)
 DEFINE_ON_DEMAND(set_eigen_face_zoneID)
 {
 	//real T_eig;
-#if !RP_NODE //get desired value from host
+#if !RP_NODE
 	bool zone_ID_exists = RP_Variable_Exists_P("user/eigen_zone_id"); // Check if user-defined parameter for eigen face zone ID exists
 	Message0("Checking for user-defined parameter 'user/eigen_zone_id': %d\n", zone_ID_exists);
 	if (zone_ID_exists)
 	{
 		eigen_face_zoneID = RP_Get_Integer("user/eigen_zone_id"); // Get eigen face zone ID from user-defined parameter if it exists
-		Message0("User-defined parameter 'user/eigen_zone_id' found with value: %d\n", eigen_face_zoneID);
+		Message("User-defined parameter 'user/eigen_zone_id' found with value: %d\n", eigen_face_zoneID);
 	}
 	else
 	{
 		eigen_face_zoneID = 0; // Default value if user-defined parameter does not exist, update with different default if desired
-		Message0("Warning: User-defined parameter 'user/eigen_zone_id' not found. Using default value of 0.\n");
+		Message("Warning: User-defined parameter 'user/eigen_zone_id' not found. Using default value of 0.\n");
 	}
 #endif
 	//node_to_host_int_1(eigen_face_zoneID); // update eigen_face_zoneID on host process so it can be used in calc_FSR_eigen
-	host_to_node_int_1(eigen_face_zoneID); //broadcast variable to nodes
-
-	Message0("eigen_face_zoneID initialized to %d \n", eigen_face_zoneID);
+	
+	host_to_node_int_1(eigen_face_zoneID); //broadcast to nodes
+	Message("eigen_face_zoneID initialized to %d \n", eigen_face_zoneID);
 }
 
 DEFINE_ON_DEMAND(residual_list)
 {
 	int nw;
 	real scaled_res;
+
+#if !RP_HOST //Run this on compute nodes or on single process in serial
 	Domain *domain=Get_Domain(1);
 
 	for(nw=0; nw<DOMAIN_NUMEQN(domain); ++nw)
@@ -741,6 +833,8 @@ DEFINE_ON_DEMAND(residual_list)
 			Message0("%s equation,residual=%g\n",DOMAIN_EQN_LABEL(domain,nw ),scaled_res);
 		}
 	}
+#endif
+
 }
 
 // Report Definition for Residual of eigenvalue-based FSR calculation
