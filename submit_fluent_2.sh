@@ -1,17 +1,20 @@
 #!/bin/bash
 set -euo pipefail
 
-OUT=${1:?Usage: ./submit_fluent.sh output_base input_case.cas.h5}
-CASE=${2:?Usage: ./submit_fluent.sh output_base input_case.cas.h5}
+OUT=${1:?Usage: ./submit_fluent_2.sh output_base input_case.cas.h5}
+CASE=${2:?Usage: ./submit_fluent_2.sh output_base input_case.cas.h5}
 GX=${GX:-0}
 GY=${GY:-9.81}
+H=${H:-0.00495}
 
-# To run: ./submit_fluent.sh [run name] [case file] 
+# To run: ./submit_fluent_2.sh [run name] [case file] 
 # inside the directory with the case file and the NCA_unix.c file
-# make executable by doing chmod +x submit_fluent.sh
+# make executable by doing chmod +x submit_fluent_2.sh
 # Optional environment overrides:
-#   FLUENT_NTASKS=8 ./submit_fluent.sh run1 SYS-4.cas.h5
-#   FLUENT_TIME=8:00:00 ./submit_fluent.sh run1 SYS-4.cas.h5
+#   FLUENT_NTASKS=8 ./submit_fluent_2.sh run1 SYS-4.cas.h5
+#   FLUENT_TIME=8:00:00 ./submit_fluent_2.sh run1 SYS-4.cas.h5
+#  To run with different gravity: GX=your_x_grav GY=your_y_grav ./submit_fluent_2.sh my_run my_case.cas.h5
+
 NTASKS=${FLUENT_NTASKS:-8}
 TIME_LIMIT=${FLUENT_TIME:-24:00:00}
 PARTITION=${FLUENT_PARTITION:-engineering}
@@ -32,9 +35,9 @@ if [[ ! -f "$CASE_ABS" ]]; then
     exit 1
 fi
 
-if [[ ! -f "NCA_unix.c" ]]; then
-    echo "Error: NCA_unx.c not found in current directory: $SUBMIT_DIR" >&2
-    echo "Run this script from the directory containing NCA_unix.c and your Fluent files." >&2
+if [[ ! -f "NCA_gap_unix.c" ]]; then
+    echo "Error: NCA_gap_unix.c not found in current directory: $SUBMIT_DIR" >&2
+    echo "Run this script from the directory containing NCA_gap_unix.c and your Fluent files." >&2
     exit 1
 fi
 
@@ -47,7 +50,7 @@ mkdir -p "$NEW_FOLDER"
 cd "$NEW_FOLDER"
 
 cp "$CASE_ABS" .
-cp ../NCA_unix.c .
+cp ../NCA_gap_unix.c .
 
 cat > "$JOU" <<EOF
 ;;; Solution Journal Script for running the NCA Fluent model in batch mode
@@ -56,9 +59,10 @@ cat > "$JOU" <<EOF
 ;;; Input case: "${CASE_ABS}"
 ;;; Local case file: "${CASE_LOCAL}"
 ;;; Gravity: GX=${GX}, GY=${GY}
+;;; Gap Height: H=${H}
 
 ;; ------Compile and load UDF------------------------------------------------------
-/define/user-defined/compiled-functions compile "lib_inlet_fsr" yes "NCA_unix.c" "" ""
+/define/user-defined/compiled-functions compile "lib_inlet_fsr" yes "NCA_gap_unix.c" "" ""
 /define/user-defined/compiled-functions load "lib_inlet_fsr"
 
 ;; ------Read case file------------------------------------------------------------
@@ -74,10 +78,11 @@ cat > "$JOU" <<EOF
 ;; ------Initialize----------------------------------------------------------------
 /solve/initialize/compute-defaults/velocity-inlet inlet
 /solve/initialize/initialize-flow
-/solve/patch () newbig () temperature 1900
+/solve/patch () ignition () temperature 1900
 /solve/patch () downstream () species-3 0
 
 ;; UDF setup
+(rp-var-define 'user/u_mean 0.145 'real #f)
 /define/user-defined/execute-on-demand "check_u_mean::lib_inlet_fsr"
 
 (rp-var-define 'user/v_f_init 0 'real #f)
@@ -85,6 +90,9 @@ cat > "$JOU" <<EOF
 
 (rp-var-define 'user/alpha 0.5 'real #f)
 /define/user-defined/execute-on-demand "set_alpha::lib_inlet_fsr"
+
+(rp-var-define 'user/h ${H} 'real #f)
+/define/user-defined/execute-on-demand "check_h::lib_inlet_fsr"
 
 ;; ------Solve---------------------------------------------------------------------
 ;;/solve/iterate 50 
