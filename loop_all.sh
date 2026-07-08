@@ -46,6 +46,8 @@ done
 # Add jobs for adittional angles -75:15:75 degrees in Earth gravity
 ANGLES=($(for ((i=75; i>=-75; i-=15)); do echo "$i"; done))
 
+G=$GE
+
 #Loop over angles
 for angle in "${ANGLES[@]}"; do
     GX=$(awk -v ang="$angle" -v G="$G" -v PI="$PI" 'BEGIN {print G * sin(ang * PI / 180.0)}')

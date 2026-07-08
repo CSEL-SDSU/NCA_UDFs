@@ -332,10 +332,12 @@ DEFINE_EXECUTE_AT_END(update_FSR_brent)
 	host_to_node_int_1(return_flag);	
 	if(return_flag) {return;}
 
+
 #if !RP_NODE
 	// Initialization of bracket (getting the first two evaluations)
 	if (STATE == EVAL_FA)
 	{
+		// If we are here and STATE=EVAL_FA, ww have finished evaluating F at the first bracket point A and will switch to the other bracket point B.
 		FA = R;
 		V_f = B; // Change V_f from V_f = A to V_f = B
 		STATE = EVAL_FB;
@@ -345,6 +347,7 @@ DEFINE_EXECUTE_AT_END(update_FSR_brent)
 	}
 	else if(STATE == EVAL_FB)
 	{
+		// If we are here and STATE=EVAL_FB, ww have finished evaluating F at the second bracket point B and will begin to iteravly shrink the brackets
 		FB = R;
 		STATE = EVAL_ITER;
 	}
@@ -528,6 +531,7 @@ DEFINE_INIT(set_Vf_at_start, d)
 	V_f = A;
 	Message0("Set V_f to lower bracket start value. V_f = %g m/s \n",V_f);
 }
+
 // Update Solid Motion 
 DEFINE_ZONE_MOTION(update_solid_motion, omega, axis, origin, velocity, current_time, dtime)
 {

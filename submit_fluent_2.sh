@@ -95,9 +95,17 @@ cat > "$JOU" <<EOF
 /define/user-defined/execute-on-demand "check_h::lib_inlet_fsr"
 
 ;; ------Solve---------------------------------------------------------------------
+;; Make sure derivatives are availible
+/solve/set/expert no no yes no
+;; Make sure species mass fraction gradients are availible
+/define/models/species/save-gradients yes
 ;;/solve/iterate 50 
 /solve/iterate 75000
 
+;; ------List available CGNS export scalars ---------------------------------------
+;;/file/export/cgns "scalar_probe" full-domain yes yes
+
+()
 ;; ------Write output case and data -----------------------------------------------
 /file/write-case-data "${FINAL_CASE_DATA}"
 
