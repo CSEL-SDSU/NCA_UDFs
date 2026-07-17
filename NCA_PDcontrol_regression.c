@@ -1,29 +1,78 @@
 #include <stdlib.h>
-#include "udf.h"
+#include <string.h>
 #include <stdbool.h>
-#include "hdfio.h"
 #include <math.h>
+
+#include "udf.h"
+#include "hdfio.h"
 
 #define EPS 2.2204460492503131e-16
 #define sgn(x)  ((x>0) - (x<0))
 
 /*--- P-control FSR calculation globals---*/
 static real V_f; //Flame Spread Rate 
-static int UPDATE_INTERVAL = 100; // Number of iterations between FSR updates
-static real Kp = 5e-8; // Proportional gain for P-control update of FSR
+static const int UPDATE_INTERVAL = 1; // Number of iterations between FSR updates
+static real Kp = 5e-9; // Proportional gain for P-control update of FSR
+static real Kd = 5e-10; //Derivative gain control
 
 //Variables required for evaluating F(X) - The residual temperature
 // And determining when an evaluation is accepted
 static real R;
-static int eigen_face_zoneID = 0; // Zone ID of separated surface where temp is monitored
+static real R_old; 
+static real dRdn = 0;
+static real dRdn_old = 0;
+static const real alpha = 0.1667; 
+static int eigen_face_zoneID = -1; // Zone ID of separated surface where temp is monitored
 static const real T_infty = 300; 
 
 // Global regressed surface coordinates. Updated when calc_regressed_surf is called
 // DO NOT USE ON HOST NODE NOT ALLOCATED
+// Before install is called calc_regression owns x_f and y_f_new. After, the memory is owned by
+// the global state x_f_g and y_f_g and x_f and y_f_new are NULL.
+
 static size_t size_g; 
-static real *x_f_g, *y_f_new_g; 
+static real *x_f_g = NULL, *y_f_new_g = NULL; 
+static bool valid_profile = false;
 static real r_eig_g[ND_ND] = {0.0, 0.0};
 
+// Dynamic grid update variables
+static int N_MESH_UPDATE_IGNORE = 5000; //# of iterations to ignore before adjusting grid
+
+static void cleanup_profile(void)
+{
+	free(x_f_g);
+	free(y_f_new_g);
+
+	x_f_g = NULL;
+	y_f_new_g = NULL;
+	size_g = 0;
+	valid_profile = false;
+}
+
+// This function takes the x_f and y_f_new arrays and assignes the global variables to point to their memory instead
+// This allows all functions to access those values now without having to allocate more memory.
+static int install_profile(real **x_src, real **y_src, size_t n)
+{
+	// Pass arguemtns as double pointers so that we may operate on the callers copy
+	if (x_src == NULL || y_src == NULL || *x_src == NULL || *y_src == NULL)
+	{
+		// If the inputs are null or point to null, fail the install
+		return 1;
+	}
+
+	// Otherwise clear the profile and install the new one
+	cleanup_profile();
+
+	x_f_g = *x_src;
+	y_f_new_g = *y_src; 
+	size_g = n;
+	valid_profile = true;
+
+	*x_src = NULL;
+	*y_src = NULL;
+
+	return 0; //Success
+}
 /*--- Comparator function for sorting face centroid coordinates ---*/
 // Comparator function for qsort. 
 // Should return:
@@ -248,11 +297,34 @@ DEFINE_EXECUTE_AT_END(update_R)
 
 	// Calculate Residual. Use synced T_eig value if parallel. Do not run on host if in parallel b/c host has T_eig = 0
 #if !RP_HOST
-	R = T_eig - 1.2 * T_infty;
+	if (N_ITER > 2)
+	{
+		R_old = R;
+		dRdn_old = dRdn; // old derivative
+
+		// New R and dRdn
+		R = T_eig - 1.2 * T_infty;
+		dRdn = R - R_old; // raw derivative
+		dRdn = alpha * (dRdn) + (1 - alpha)*dRdn_old;
+	}
+	else if (N_ITER > 1)
+	{
+		R_old = R;
+		R = T_eig - 1.2 * T_infty;
+
+		dRdn = R - R_old; // raw derivative
+		
+		dRdn_old = dRdn; // when we dont have dRdn_old, use raw derivatibe
+		dRdn = alpha * (dRdn) + (1 - alpha) * dRdn_old;
+	}
+	else 
+	{
+		R = T_eig - 1.2 * T_infty;
+	}
 #endif
 
 	// update R, T_eig, and face count on host process so report is correct
-	node_to_host_real_2(R,T_eig);    
+	node_to_host_real_5(R,T_eig,R_old, dRdn, dRdn_old);    
 	node_to_host_int_1(n_eig_faces);
 
 	// Store R
@@ -268,12 +340,12 @@ DEFINE_EXECUTE_AT_END(update_R)
 
 	if (N_ITER % 25 == 0)
 	{
-		Message("Iteration %d: R = %g K, T_eig = %g K, V_f = %g m/s\n", N_ITER, R, T_eig, V_f);
+		Message("Iteration %d: R = %g K, dR/dn = %g, T_eig = %g K, V_f = %g m/s\n", N_ITER, R, dRdn, T_eig, V_f);
 	}
 #endif
 }
 
-DEFINE_EXECUTE_AT_END(update_FSR_Pcontrol)
+DEFINE_EXECUTE_AT_END(update_FSR_PDcontrol)
 {
 
 	int return_flag = 0;
@@ -295,7 +367,7 @@ DEFINE_EXECUTE_AT_END(update_FSR_Pcontrol)
 	// R = T(x_eig) - 1.2*T_infty. 
 	// If R > 0, then flame is spreading too fast and is spreading faster than frame -> increase V_f (flame moving towards inlet)
 	// If R < 0, then flame is spreading too slow and frame is outpacing flame -> decrease V_f (flame moving towards outlet)
-	real V_f_new = V_f + Kp * R; 
+	real V_f_new = V_f + Kp * R + Kd * dRdn; 
 
 	V_f = MAX(V_f_new, 0.0); //Floor V_f at 0 m/s
 #endif
@@ -304,10 +376,59 @@ DEFINE_EXECUTE_AT_END(update_FSR_Pcontrol)
 	host_to_node_real_1(V_f);
 
 #if !RP_NODE
-	Message("Updated FSR to %g m/s using P-control with Kp = %g and R = %g K\n", V_f, Kp, R);
+	Message("Updated FSR to %g m/s using P-control with Kp = %g, Kd = %g, and R = %g K\n", V_f, Kp, Kd, R);
 #endif
 }
 
+// Function to execute scheme commands and update the grid
+// When it is time to update, this function sets the string rp varibale that is the command that gets executed every iteration
+// user define iterations to execute the grid motion 
+// DEFINaE_ADJUST(update_grid, d)
+// {
+// 	// Check if it is time for update
+// 	if (N_ITER < N_MESH_UPDATE_IGNORE)
+// 	{
+// 		Message0("Not enough iterations, skipping update. N_ITER=%d\n",N_ITER);
+		
+// 		return;
+// 	}
+
+// 	// Check to make sure flame spread it is greater than zero.
+// 	if (V_f <= 0.0)
+// 	{
+// 		Message0("V_f too small. V_f = %g m/s\n",V_f);
+// 		return;
+// 	}
+
+// 	RP_Set_String("update_grid_command",
+//     "/define/user-defined/execute-on-demand \"calc_regression::lib_inlet_fsr\"\n"
+//     "/solve/mesh-motion\n"
+//     "yes\n");
+// }
+
+// Check variables that could be uninitialized at start of each iteration.
+DEFINE_ADJUST(check_eigen_face_zoneID, d)
+{
+	if(eigen_face_zoneID == -1)
+	{
+		Message0("Error: eigen_face_zoneID = %d, STOPPING CALCULATION",eigen_face_zoneID);
+		RP_Set_Integer("sol/iterations",0);
+
+		Error("check_eigen_zone: eigen_face_zoneID not properly set. Please set the rp variable 'user/eigen_zone_id' and run the 'set_eigen_face_zone' ON_DEMAND UDF.\n");
+	}
+
+}
+
+DEFINE_ADJUST(check_update_grid_command, d)
+{
+	bool scheme_command_exists = RP_Variable_Exists_P("user/update_grid_command");
+
+	if (!scheme_command_exists)
+	{
+		Message0("Error: rp variable 'user/update_grid_command' does not exist. Cannot execute solve grid. STOPPING CALCULATION\n");
+		RP_Set_Integer("sol/iterations",0);
+	}
+}
 
 DEFINE_INIT(init_RP_vars, d)
 {
@@ -326,23 +447,6 @@ DEFINE_INIT(init_RP_vars, d)
 	{
 		V_f = 0.0; // Default initial FSR value if user-defined parameter does not exist
 		Message("Warning: User-defined parameter 'user/v_f_init' not found. Using default value of 0 m/s.\n");
-	}
-
-	// Check for UPDATE INTERVAL value
-
-	bool UPDATE_INTERVAL_exists = RP_Variable_Exists_P("user/update_interval");
-
-	Message("Checking for user-defined parameter 'user/update_interval': %d\n", UPDATE_INTERVAL_exists);
-
-	if (UPDATE_INTERVAL_exists)
-	{
-		UPDATE_INTERVAL = RP_Get_Integer("user/update_interval");
-		Message("User-defined parameter 'user/update_interval' found with value: %d\n", UPDATE_INTERVAL);
-	}
-	else
-	{
-		UPDATE_INTERVAL = 100; // Default initial FSR value if user-defined parameter does not exist
-		Message("Warning: User-defined parameter 'user/update_interval' not found. Using default value of 100.\n");
 	}
 
 	bool Kp_exists = RP_Variable_Exists_P("user/kp");
@@ -364,9 +468,6 @@ DEFINE_INIT(init_RP_vars, d)
 	host_to_node_real_1(V_f);
 	Message0("V_f initialized to %g m/s \n",V_f);
 
-	host_to_node_int_1(UPDATE_INTERVAL);
-	Message0("UPDATE_INTERVAL initialized to %d iterations \n",UPDATE_INTERVAL);
-
 	host_to_node_real_1(Kp);
 	Message0("Kp initialized to %g \n",Kp);
 }
@@ -387,8 +488,23 @@ DEFINE_ZONE_MOTION(update_solid_motion, omega, axis, origin, velocity, current_t
 //	1. calc_regression (populate x_f_g and y_f_new_g)
 //	2. regress_surface for wall and its shadow (uses x_f_g and y_f_g to move nodes)
 //	3. free x_f_g and y_f_new_g
+
+// New process for this:
+/*
+1. Setup a calculation activity with these commands with the frequency you want the mesh to update at: 
+	/define/user-defined/execute-on-demand/inlet_fsr:calc_regression
+	(ti-menu-load-string (%rpgetvar 'user/update_grid_command)
+2. calc_regression will always run and will calculate and populate the globals x_f_g and y_f_new_g for the DEFINE_GRID-MOTION
+	UDFs to access. If the calculated profile is valid (doesn't contain nans/infinite slope) the command that gets executed in the activity
+	'user/update_grid_command' is set to 'solve/mesh-motion yes' so that the grid is actually moved, otherwise the globals are populated
+	with place holders and the 'user/update_grid_command' is set to a non-action, skipping the mesh update. 
+3. When the profile is okay and the command is 'solve/mesh-motion yes', regress_surface is executed. This function checks again that 
+	the profile is not null and moves the nodes accordingly. 
+*/
 DEFINE_ON_DEMAND(calc_regression)
 {
+	int profile_ok = 1;
+
 #if !RP_HOST // Run on nodes in parallel or single process in serial host does nothing for this UDF
 	// Data lookup variables
 	Domain *d = Get_Domain(1); // Get domain pointer, update if different
@@ -594,12 +710,24 @@ DEFINE_ON_DEMAND(calc_regression)
 		free(idx_f);
 
 		// Perform cumulative integral
-
+		// checks for infinite slope
+		
 		// allocate y_f_new on node zero 
 		y_f_new = malloc(size * sizeof(real));
 
 		for (int k = 0; k < size; k++)
 		{
+			// check for infinite slope
+			real rad = pow(rho * V_f * A_f[k], 2) - pow(mdot_f[k], 2);
+
+			if (rad <= 0)
+			{
+				profile_ok = 0;
+				Message0("Warning: Infinite slope detected, regression profile invalid. mdot_f = %g kg/s, rhoV_fA = %g kg/s, x = %g m\n",
+					 mdot_f[k], rho * V_f * A_f[k], x_f[k]);
+				break;
+			}
+
 			I += mdot_f[k] * dx_f[k] / sqrt(pow(rho * V_f * A_f[k], 2) - pow(mdot_f[k], 2));
 			//I += mdot_f[k]*nhat_x[k] / A_f[k] / sqrt(pow(rho * V_f * A_f[k], 2) + pow(mdot_f[k], 2));
 
@@ -607,6 +735,18 @@ DEFINE_ON_DEMAND(calc_regression)
 
 			Message0("y_f_new(x = %g m) = %g m \n", x_f[k], y_f_new[k]);
 		}	
+
+		/* If any point failed, overwrite the partially computed profile with a finite dummy profile.
+		It should not be used because mycommand will be set to no-op, but this avoids sending NaNs. */
+		if (!profile_ok)
+		{
+			for (int k = 0; k < size; k++)
+			{
+				y_f_new[k] = y_f[k];
+			}
+
+			Message0("Warning: Regression rejected. profile_ok = %d \n", profile_ok);
+		}
 
 		// Send a copy of the sorted x_f and y_f_new to all other nodes
 		compute_node_loop_not_zero(i)
@@ -617,7 +757,7 @@ DEFINE_ON_DEMAND(calc_regression)
 
 	}
 
-	// Allocate memoery for y_f_new on all other nodes
+	// Allocate memory for y_f_new on all other nodes
 	// reallocate x_f since it should already exist on other nodes from initial array fill
 	if (! I_AM_NODE_ZERO_P)
 	{
@@ -648,13 +788,25 @@ DEFINE_ON_DEMAND(calc_regression)
 		Message("y_f_new and x_f recieved on all other node %d from node 0 \n", myid);
 	}
 
-	// Set global storage on compute nodes
-	x_f_g = malloc(size * sizeof(real));
-	y_f_new_g = malloc(size * sizeof(real));
-	size_g = size; 
+	// Set global storage on compute nodes. If fail (install_profile returns 1), cleanup
+	if (install_profile(&x_f, &y_f_new, (size_t)size))
+	{
+		free(x_f);
+		free(y_f);
+		free(mdot_f);
+		free(A_f);
+		free(dx_f);
+		free(y_f_new);
 
-	memcpy(x_f_g, x_f, size * sizeof(real));
-	memcpy(y_f_new_g, y_f_new, size * sizeof(real));
+		Error("calc_regression: install_profile failed.\n");
+	}
+
+	// x_f_g = malloc(size * sizeof(real));
+	// y_f_new_g = malloc(size * sizeof(real));
+	// size_g = size; 
+
+	// memcpy(x_f_g, x_f, size * sizeof(real));
+	// memcpy(y_f_new_g, y_f_new, size * sizeof(real));
 
 	// Loop over nodes and interpolate their new position
 	Node *v; 
@@ -670,13 +822,13 @@ DEFINE_ON_DEMAND(calc_regression)
 
 			// if the node is left of the first centroid, it connects to the
 			// eigen face and should not move. 
-			if (x_node < x_f[0])
+			if (x_node < x_f_g[0])
 			{
 				y_node_new = r_eig[1]; 
 			}
 			else
 			{
-				y_node_new = interp1d(x_f, y_f_new, size, x_node, true);
+				y_node_new = interp1d(x_f_g, y_f_new_g, size, x_node, true);
 			}
 			
 			// Print new coordinates (may duplicate)
@@ -685,22 +837,45 @@ DEFINE_ON_DEMAND(calc_regression)
 	}
 	end_f_loop(f, t)
 
-	// Free allocated memory on all nodes
-	free(x_f);
+	// Free allocated memory on all nodes. Do not free x_f or y_f_new after installing the profile
+	//free(x_f);
 	free(y_f);
 	free(mdot_f);
 	free(A_f);
 	free(dx_f);
-	free(y_f_new);
+	//free(y_f_new);
 
+	profile_ok = PRF_GILOW1(profile_ok); //if profile_ok is zero on any node, set it to zero on all nodes 
 #endif 
 
+	//update profile_ok on host
 
+	node_to_host_int_1(profile_ok);
+
+	// Set the proper mesh action command
+#if !RP_NODE
+	if (profile_ok)
+	{
+		RP_Set_String("user/update_grid_command", "/solve/mesh-motion yes\n");
+		Message("calc_regression: valid profile. Mesh motion enabled.\n");
+	}
+	else
+	{
+		RP_Set_String("user/update_grid_command", "\n");
+		Message("Warning: calc_regression: invalid profile. Mesh motion skipped.\n");
+	}
+#endif
 }
 
 DEFINE_GRID_MOTION(regress_surface, d, dt, time, dtime)
 {
 #if !RP_HOST
+	//Check for valid profile
+	if (!valid_profile || x_f_g == NULL || y_f_new_g == NULL || size_g < 2)
+	{
+		Error("regress_surface: no valid regression profile. Run calc_regression first.\n");
+	}
+
 	// Convert dynamic thread into normal thread
 	Thread *t = DT_THREAD(dt);
 	face_t f;
@@ -754,8 +929,9 @@ DEFINE_GRID_MOTION(regress_surface, d, dt, time, dtime)
 DEFINE_ON_DEMAND(free_xf_and_yf_new_globs)
 {
 #if !RP_HOST
-	free(x_f_g);
-	free(y_f_new_g);
+	// free(x_f_g);
+	// free(y_f_new_g);
+	cleanup_profile();
 	Message0("x_f_g and y_f_g freed \n");
 #endif
 }
@@ -1215,8 +1391,8 @@ DEFINE_ON_DEMAND(set_Kp)
 	}
 	else
 	{
-		Kp = 5e-8; // Default initial FSR value if user-defined parameter does not exist
-		Message("Warning: User-defined parameter 'user/kp' not found. Using default value of 5e-8.\n");
+		Kp = 5e-9; // Default initial FSR value if user-defined parameter does not exist
+		Message("Warning: User-defined parameter 'user/kp' not found. Using default value of 5e-9.\n");
 	}
 
 #endif
@@ -1226,30 +1402,77 @@ DEFINE_ON_DEMAND(set_Kp)
 	Message0("Kp initialized to %g \n",Kp);
 }
 
-DEFINE_ON_DEMAND(set_UPDATE_INTERVAL)
+DEFINE_ON_DEMAND(set_Kd)
 {
 #if !RP_NODE
-	// Check for UPDATE INTERVAL value
-	bool UPDATE_INTERVAL_exists = RP_Variable_Exists_P("user/update_interval");
+	bool Kd_exists = RP_Variable_Exists_P("user/kd");
 
-	Message("Checking for user-defined parameter 'user/update_interval': %d\n", UPDATE_INTERVAL_exists);
-
-	if (UPDATE_INTERVAL_exists)
+	if (Kd_exists)
 	{
-		UPDATE_INTERVAL = RP_Get_Integer("user/update_interval");
-		Message("User-defined parameter 'user/update_interval' found with value: %d\n", UPDATE_INTERVAL);
+		Kd = RP_Get_Real("user/kd");
+		Message("User-defined parameter 'user/kd' found with value: %g\n", Kd);
 	}
 	else
 	{
-		UPDATE_INTERVAL = 100; // Default initial FSR value if user-defined parameter does not exist
-		Message("Warning: User-defined parameter 'user/update_interval' not found. Using default value of 100.\n");
+		Kd = 5e-10; // Default initial FSR value if user-defined parameter does not exist
+		Message("Warning: User-defined parameter 'user/kd' not found. Using default value of 5e-10.\n");
 	}
+
 #endif
 
 	// Pass parameters to nodes
-	host_to_node_int_1(UPDATE_INTERVAL);
-	Message0("UPDATE_INTERVAL initialized to %d iterations \n",UPDATE_INTERVAL);
+	host_to_node_real_1(Kd);
+	Message0("Kd initialized to %g \n",Kd);
 }
+
+DEFINE_ON_DEMAND(set_N_MESH_UPDATE_IGNOTE)
+{
+	#if !RP_NODE
+	bool n_mesh_ignore_exists = RP_Variable_Exists_P("user/n_mesh_ignore");
+
+	if (n_mesh_ignore_exists)
+	{
+		N_MESH_UPDATE_IGNORE = RP_Get_Integer("user/n_mesh_ignore");
+		Message("User-defined parameter 'user/n_mesh_ignore' found with value: %d\n", N_MESH_UPDATE_IGNORE);
+	}
+	else
+	{
+		N_MESH_UPDATE_IGNORE = 5000;
+		Message("Warning: User-defined parameter 'user/n_mesh_ignore' not found. Using default value of %d.\n", N_MESH_UPDATE_IGNORE);
+	}
+
+#endif
+
+	// Pass parameters to nodes
+	host_to_node_int_1(N_MESH_UPDATE_IGNORE);
+	Message0("N_MESH_UPDATE_IGNORE initialized to %g \n",N_MESH_UPDATE_IGNORE);
+}
+
+// DEFINE_ON_DEMAND(set_UPDATE_INTERVAL)
+// {
+// #if !RP_NODE
+// 	// Check for UPDATE INTERVAL value
+// 	bool UPDATE_INTERVAL_exists = RP_Variable_Exists_P("user/update_interval");
+
+// 	Message("Checking for user-defined parameter 'user/update_interval': %d\n", UPDATE_INTERVAL_exists);
+
+// 	if (UPDATE_INTERVAL_exists)
+// 	{
+// 		UPDATE_INTERVAL = RP_Get_Integer("user/update_interval");
+// 		Message("User-defined parameter 'user/update_interval' found with value: %d\n", UPDATE_INTERVAL);
+// 	}
+// 	else
+// 	{
+// 		UPDATE_INTERVAL = 100; // Default initial FSR value if user-defined parameter does not exist
+// 		Message("Warning: User-defined parameter 'user/update_interval' not found. Using default value of 100.\n");
+// 	}
+// #endif
+
+// 	// Pass parameters to nodes
+// 	host_to_node_int_1(UPDATE_INTERVAL);
+// 	Message0("UPDATE_INTERVAL initialized to %d iterations \n",UPDATE_INTERVAL);
+// }
+
 /*=================================================================================
 * Functions for calculating the FSR using the eigenposition-based method with 
 * bisection based updates. This method uncouples the perscribed surface regression
@@ -1288,7 +1511,7 @@ DEFINE_ON_DEMAND(set_eigen_face_zoneID)
 	else
 	{
 		eigen_face_zoneID = 0; // Default value if user-defined parameter does not exist, update with different default if desired
-		Message("Warning: User-defined parameter 'user/eigen_zone_id' not found. Using default value of 0.\n");
+		Message("Warning: User-defined parameter 'user/eigen_zone_id' not found. Using default value of -1. Please set the rp variable. \n");
 	}
 #endif
 	//node_to_host_int_1(eigen_face_zoneID); // update eigen_face_zoneID on host process so it can be used in calc_FSR_eigen
@@ -1320,22 +1543,36 @@ DEFINE_RW_FILE(read_FSR, fp)
 DEFINE_RW_HDF_FILE(write_FSR_hdf, filename)
 {
 
-	char* path = "/FSR_data"; // HDF5 dataset path for FSR data
-	real* data_ptr = &V_f; // Pointer to FSR data to write
+	char* fsr_path = "/FSR_data"; // HDF5 dataset path for FSR data
+	real* fsr_data_ptr = &V_f; // Pointer to FSR data to write
 	size_t nelems = 1; // Number of elements to write (1 in this case since we're writing a single value)
 
-	Write_Complete_User_Dataset(filename, path, data_ptr, nelems);
+	Write_Complete_User_Dataset(filename, fsr_path, fsr_data_ptr, nelems);
+
+	char* eigen_zone_path = "/eigen_zoneID_data";
+	real eigen_face_zoneID_real = (real)eigen_face_zoneID;
+
+	Write_Complete_User_Dataset(filename, eigen_zone_path, &eigen_face_zoneID_real, nelems);
 
 }
 
 DEFINE_RW_HDF_FILE(read_FSR_hdf, filename)
 {
-	char* path = "/FSR_data"; // HDF5 dataset path for flame spread rate data
-	real* data_ptr = &V_f; // Pointer to FSR variable to read into
+	char* fsr_path = "/FSR_data"; // HDF5 dataset path for flame spread rate data
+	real* fsr_data_ptr = &V_f; // Pointer to FSR variable to read into
 	size_t nelems = 1; // Number of elements to read (1 in this case since we're reading a single value)
 
-	Read_Complete_User_Dataset(filename, path, data_ptr, nelems);
+	Read_Complete_User_Dataset(filename, fsr_path, fsr_data_ptr, nelems);
 
-	host_to_node_real_1(V_f);
+	char* eigen_zone_path = "/eigen_zoneID_data";
+	real eigen_zoneID_real = 0;
+
+	Read_Complete_User_Dataset(filename, eigen_zone_path, &eigen_zoneID_real, nelems);
+
+	eigen_face_zoneID = (int)eigen_zoneID_real;
+
+	node_to_host_real_1(V_f);
+	node_to_host_int_1(eigen_face_zoneID);
+	//host_to_node_real_1(V_f);
 }
 
