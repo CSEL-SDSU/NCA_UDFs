@@ -1,10 +1,10 @@
+#include "udf.h"
+#include "hdfio.h"
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
 #include <math.h>
-
-#include "udf.h"
-#include "hdfio.h"
 
 #define EPS 2.2204460492503131e-16
 #define sgn(x)  ((x>0) - (x<0))
@@ -37,6 +37,7 @@ static real r_eig_g[ND_ND] = {0.0, 0.0};
 
 // Dynamic grid update variables
 static int N_MESH_UPDATE_IGNORE = 5000; //# of iterations to ignore before adjusting grid
+static int N_MESH_UPDATES = 0; // Counter for number of mesh updates performed
 
 static void cleanup_profile(void)
 {
@@ -856,8 +857,13 @@ DEFINE_ON_DEMAND(calc_regression)
 #if !RP_NODE
 	if (profile_ok)
 	{
-		RP_Set_String("user/update_grid_command", "/solve/mesh-motion yes\n");
+		RP_Set_String("user/update_grid_command", 
+			"/solve/mesh-motion yes\n"
+			"/define/models/radiation/s2s-parameters/compute-write-vf \"SYS-4.s2s.h5\" yes\n");
+
 		Message("calc_regression: valid profile. Mesh motion enabled.\n");
+		N_MESH_UPDATES++;
+		Message0("N_MESH_UPDATES=%d \n", N_MESH_UPDATES);
 	}
 	else
 	{
@@ -935,325 +941,6 @@ DEFINE_ON_DEMAND(free_xf_and_yf_new_globs)
 	Message0("x_f_g and y_f_g freed \n");
 #endif
 }
-/*
-DEFINE_GRID_MOTION(regress_surface, d, dt, time, dtime)
-{
-#if !RP_HOST // Run on nodes in parallel or single process in serial host does nothing for this UDF
-	//=========== Data lookup variables===============
-	//Domain *d = Get_Domain(1); // Get domain pointer, update if different
-	//int regression_zone_id = 5; 
-	//Thread *t = Lookup_Thread(d, regression_zone_id); // get pointer to regressed surface thread
-
-	// Convert dynamic thread into normal thread
-	Thread *t = DT_THREAD(dt);
-
-	real *y_f_new; // Create vectors to store face centroid coordinates.
-	real *x_f, *y_f, *mdot_f, *A_f, *dx_f; //Current centroid coordinates vector
-	int *idx_f; // Array to store indicies for f 
-
-	real r[ND_ND]; // vector to store face centroid coordinates
-	//FaceData *faces_data;
-
-	face_t f;
-
-	Thread *t_eigen = Lookup_Thread(d, eigen_face_zoneID); // get pointer to eigen face thread
-	real r_eig[ND_ND] = {0.0, 0.0}; // coordinate of eigen face centroid, 
-	real iwork[ND_ND];  // i work is temp array storage
-	
-
-	// Node **eigen_nodes; // create vector of node pointers for eigen face nodes
-	// Node *v; // node pointer for looping throuh nodes
-
-	// Integration variables
-	const real rho = 1190; // [kg/m^3] Density of solid phase
-
-	// Integrals in the numerator and deniminator
-	real I_num = 0;
-	real I_denom = 0;
-	real I = 0; // Integral of x-component of face area vector, sum of A_face_x = sum of A_face * f'(x)/sqrt(f'(x)^2+1) over all faces along surface
-
-	real A_face[ND_ND]; // Face area vector
-	real A_face_mag; // Face area magnitude
-
-	// Get the eigen face nodes from the eigen face zone ID
-	begin_f_loop(f, t_eigen)
-	{
-		if (PRINCIPAL_FACE_P(f, t_eigen))
-		{
-			F_CENTROID(r_eig, f, t_eigen); // get eigen face centroid coordinates
-		}
-	}
-	end_f_loop(f, t_eigen)
-
-	// Synchronize centroid coordinates
-	PRF_GRSUM(r_eig, ND_ND, iwork);
-	Message0("Eigenface centroid found. x_eig = %g m, y_eig = %g m \n", r_eig[0], r_eig[1]);
-
-	// Get number of interior faces on thread on each compute node
-	int size = 0;
-	begin_f_loop(f, t)
-	{
-		if PRINCIPAL_FACE_P(f, t)
-		{
-			size++;
-		}
-	}
-	end_f_loop(f, t)
-
-	Message("faces:%d found on partition/node: %d \n", size, myid);
-
-	// Send the size (number of faces) to node zero from each node
-	if (! I_AM_NODE_ZERO_P)
-	{
-		PRF_CSEND_INT(node_zero, &size, 1, myid);
-	}
-
-	// Allocate memory for faces_data and y_f_new on each compute node
-	x_f = malloc(size * sizeof(real));
-	y_f = malloc(size * sizeof(real));
-	mdot_f = malloc(size * sizeof(real));
-	A_f = malloc(size * sizeof(real));
-	dx_f = malloc(size * sizeof(real));
-	// idx_f = malloc(size * sizeof(int));
-
-	//faces_data = malloc(size * sizeof(FaceData));
-	//y_f_new = malloc(size * sizeof(real));
-	Message0("faces_data allocated on nodes\n");
-
-	// Fill arrays on each node
-	int i = 0;
-	begin_f_loop(f, t)
-	{
-		if (PRINCIPAL_FACE_P(f, t))
-		{
-			//faces_data[i].f = f; 
-		
-			// faces[i] = f; 
-			F_CENTROID(r, f, t); //get face centroid coordinates
-
-			x_f[i] = r[0];
-			y_f[i] = r[1];
-			mdot_f[i] = F_FLUX(f, t);
-
-			F_AREA(A_face, f, t); // Get face area vector for current face
-			A_face_mag = NV_MAG(A_face);
-			A_f[i] = A_face_mag; // Get face area magnitude for current face
-			dx_f[i] = fabs(A_face[1]); // get dx which is y-normal component of face area vector
-			//nhat_x[i] = A_face[0] / A_face_mag; // Get x-component of face normal vector for current face
-
-			//idx_f[i] = i;
-			//faces_data[i].x_f = r[0];
-			//faces_data[i].y_f = r[1];
-
-			i++;
-		}
-	}
-	end_f_loop(f, t)
-
-	// Send face coordinates array to node zero from node 1,2,...
-	Message0("Starting Transfer from node 1,2,... to 0\n");
-	if (! I_AM_NODE_ZERO_P)
-	{
-		PRF_CSEND_REAL(node_zero, x_f, size, myid);
-		PRF_CSEND_REAL(node_zero, y_f, size, myid);
-		PRF_CSEND_REAL(node_zero, mdot_f, size, myid);
-		PRF_CSEND_REAL(node_zero, A_f, size, myid);
-		PRF_CSEND_REAL(node_zero, dx_f, size, myid);
-		
-		//PRF_CSEND_INT(node_zero, idx_f, size, myid);
-	}
-
-	// Recieve data on node zero
-	if (I_AM_NODE_ZERO_P)
-	{
-		// I think loop over all nodes except node zero (This is not well documented by fluent)
-		// Supposedly this macro is in para.h, but it does not see to be there anymore.
-		compute_node_loop_not_zero(i)
-		{
-			int old_size = size;
-
-			PRF_CRECV_INT(i, &size, 1, i); //Replace size with the value sent from node i earlier
-
-			// Calculate new size to append data to single node zero owned array 
-			int new_size = old_size + size; 
-
-			Message0("Reallocating arrays from size:%d to new_size: %d \n", old_size, new_size);
-
-			// Reallocate arrays
-			x_f = realloc(x_f, new_size * sizeof(real));
-			y_f = realloc(y_f, new_size * sizeof(real));
-			mdot_f = realloc(mdot_f, new_size * sizeof(real));
-			A_f = realloc(A_f, new_size * sizeof(real));
-			dx_f = realloc(dx_f, new_size * sizeof(real));
-
-			//idx_f = realloc(idx_f, new_size * sizeof(int));
-
-			// Recieve data from arrays sent earlier from node 1,2,..
-			// Store the data in the appended room to the x_f and y_f arrays
-			PRF_CRECV_REAL(i, &x_f[old_size], size, i);
-			PRF_CRECV_REAL(i, &y_f[old_size], size, i);
-			PRF_CRECV_REAL(i, &mdot_f[old_size], size, i);
-			PRF_CRECV_REAL(i, &A_f[old_size], size, i);
-			PRF_CRECV_REAL(i, &dx_f[old_size], size, i);
-			
-			//PRF_CRECV_INT(i, &idx_f[old_size], size, i);
-
-			// update size
-			size = new_size; 
-
-			Message0("Data recieved from node %d \n", i);
-		}
-
-		// Sort using qsort_s (may need to be switched to qsort_r when using linux)
-		// Sort index array based on context array x_f
-
-		// build index array
-		idx_f = malloc(size * sizeof(int));
-		for (int l = 0; l < size; l++) {idx_f[l] = l;}
-
-		qsort_s(idx_f, size, sizeof(int), compare_xf, x_f);
-
-		// Re order x_f and y_f
-		real *temp_x_f = malloc(size * sizeof(real));
-		real *temp_y_f = malloc(size * sizeof(real));
-		real *temp_mdot_f =  malloc(size * sizeof(real));
-		real *temp_A_f = malloc(size * sizeof(real));
-		real *temp_dx_f = malloc(size * sizeof(real));
-
-		memcpy(temp_x_f, x_f, size * sizeof(real));
-		memcpy(temp_y_f, y_f, size * sizeof(real));
-		memcpy(temp_mdot_f, mdot_f, size * sizeof(real));
-		memcpy(temp_A_f, A_f, size * sizeof(real));
-		memcpy(temp_dx_f, dx_f, size * sizeof(real));
-	
-		for (int j = 0; j < size; j++)
-		{
-			x_f[j] = temp_x_f[idx_f[j]];
-			y_f[j] = temp_y_f[idx_f[j]];
-			mdot_f[j] = temp_mdot_f[idx_f[j]];
-			A_f[j] = temp_A_f[idx_f[j]];
-			dx_f[j] = temp_dx_f[idx_f[j]];
-		}
-		
-		free(temp_x_f); //free temporary arrays
-		free(temp_y_f); 
-		free(temp_mdot_f);
-		free(temp_A_f);
-		free(temp_dx_f);
-		free(idx_f);
-
-		// Perform cumulative integral
-
-		// allocate y_f_new on node zero 
-		y_f_new = malloc(size * sizeof(real));
-
-		for (int k = 0; k < size; k++)
-		{
-			I += mdot_f[k] * dx_f[k] / sqrt(pow(rho * V_f * A_f[k], 2) - pow(mdot_f[k], 2));
-			//I += mdot_f[k]*nhat_x[k] / A_f[k] / sqrt(pow(rho * V_f * A_f[k], 2) + pow(mdot_f[k], 2));
-
-			y_f_new[k] = r_eig[1] + I;
-
-			Message0("y_f_new(x = %g m) = %g m \n", x_f[k], y_f_new[k]);
-		}	
-
-		// Send a copy of the sorted x_f and y_f_new to all other nodes
-		compute_node_loop_not_zero(i)
-		{
-			Message0("Sending size of y_f_new from node 0 to %d \n", i);
-			PRF_CSEND_INT(i, &size, 1, myid); //send size of y_f new to other nodes 
-		}
-
-	}
-
-	// Allocate memoery for y_f_new on all other nodes
-	// reallocate x_f since it should already exist on other nodes from initial array fill
-	if (! I_AM_NODE_ZERO_P)
-	{
-		PRF_CRECV_INT(node_zero, &size, 1, node_zero);
-		y_f_new = malloc(size * sizeof(real));
-		x_f = realloc(x_f, size * sizeof(real));
-	}
-	Message0("y_f_new allocated and x_f reallocated on all nodes\n");
-
-	// Wait and make sure y_f_new is allocated
-	PRF_GSYNC();
-
-	// Send y_f_new array from zero to 1,2...
-	if (I_AM_NODE_ZERO_P)
-	{
-		compute_node_loop_not_zero(i)
-		{
-			PRF_CSEND_REAL(i, y_f_new, size, myid);
-			PRF_CSEND_REAL(i, x_f, size, myid);
-		}
-	}
-
-	// Recieve y_f_new and x_f from node zero
-	if (! I_AM_NODE_ZERO_P)
-	{
-		PRF_CRECV_REAL(node_zero, y_f_new, size, node_zero);
-		PRF_CRECV_REAL(node_zero, x_f, size, node_zero);
-		Message("y_f_new and x_f recieved on all other node %d from node 0 \n", myid);
-	}
-
-	// ---- Moving Nodes HERE ----
-	// Loop over nodes and interpolate their new position
-	Node *v; 
-	int n;
-	real r_new[ND_ND];
-
-	// Set deforming flag on adjacent cell zone/s?
-	SET_DEFORMING_THREAD_FLAG(THREAD_T0(t));
-
-	begin_f_loop(f, t)
-	{
-		f_node_loop(f, t, n)
-		{
-			v = F_NODE(f, t, n);
-			real x_node = NODE_X(v);
-			real y_node_new;
-
-			if (NODE_POS_NEED_UPDATE (v))
-			{
-				NODE_POS_UPDATED(v); //indicate that node position was updated to prevent repeats
-				// if the node is left of the first centroid, it connects to the
-				// eigen face and should not move. 
-				if (x_node < x_f[0])
-				{
-					y_node_new = r_eig[1]; 
-				}
-				else
-				{
-					y_node_new = interp1d(x_f, y_f_new, size, x_node, true);
-				}
-				
-				r_new[0] = x_node;
-				r_new[1] = y_node_new;
-
-				// Set the new node coordinates
-				NV_V(NODE_COORD(v), = , r_new);
-
-				// Print new coordinates (may duplicate)
-				Message("Node moved: y_node_new(x = %g m) = %g m \n", x_node, y_node_new);
-			}			
-		}
-	}
-	end_f_loop(f, t)
-
-	// Free allocated memory on all nodes
-	free(x_f);
-	free(y_f);
-	free(mdot_f);
-	free(A_f);
-	free(dx_f);
-	free(y_f_new);
-
-	//free(idx_f);
-	
-#endif 
-}
-*/
 
 DEFINE_GRID_MOTION(restore_exp_surface, d, dt, time, dtime)
 {
