@@ -12,9 +12,9 @@
 /*--- PID-control FSR calculation globals---*/
 static real V_f; //Flame Spread Rate 
 static const int UPDATE_INTERVAL = 1; // Number of iterations between FSR updates
-static real Kp = 2e-7; // Proportional gain for P-control update of FSR
-static real Ki = 2.5e-9; // Integral gain control
-static real Kd = 1e-8; // Derivative gain control
+static real Kp = 1e-6; // Proportional gain for P-control update of FSR
+static real Ki = 7.5e-9; // Integral gain control
+static real Kd = 1e-7; // Derivative gain control
 
 /*
  * Controller bias and integral state.
@@ -24,10 +24,10 @@ static real Kd = 1e-8; // Derivative gain control
  *     dRdn = 0
  *     V_f = V_f_bias + I_term
  */
-static real V_f_bias = 65e-6;
+static real V_f_bias = 40e-6;
 static real I_term = 0.0; 
 
-static const real R_integral_enable = 1.0; //abs of R to accumulate integral to prevent windup
+static const real R_integral_enable = 10; //abs of R to accumulate integral to prevent windup, prob make rp variable
 
 //Variables required for evaluating F(X) - The residual temperature
 // And determining when an evaluation is accepted
@@ -38,6 +38,10 @@ static real dRdn_old = 0;
 static const real alpha = 0.1667; 
 static int eigen_face_zoneID = -1; // Zone ID of separated surface where temp is monitored
 static const real T_infty = 300; 
+static real T_eig_setpoint = 360; // Pseudo fixed temperature of eigen face
+
+static const real I_min = -55e-6;
+static const real I_max =  35e-6;
 
 // Global regressed surface coordinates. Updated when calc_regressed_surf is called
 // DO NOT USE ON HOST NODE NOT ALLOCATED
@@ -318,14 +322,16 @@ DEFINE_EXECUTE_AT_END(update_R)
 		dRdn_old = dRdn; // old derivative
 
 		// New R and dRdn
-		R = T_eig - 1.2 * T_infty;
+		R = T_eig - T_eig_setpoint;
+		//R = T_eig - 1.2 * T_infty;
 		dRdn = R - R_old; // raw derivative
 		dRdn = alpha * (dRdn) + (1 - alpha)*dRdn_old;
 	}
 	else if (N_ITER > 1)
 	{
 		R_old = R;
-		R = T_eig - 1.2 * T_infty;
+		//R = T_eig - 1.2 * T_infty;
+		R = T_eig - T_eig_setpoint;
 
 		dRdn = R - R_old; // raw derivative
 		
@@ -334,7 +340,8 @@ DEFINE_EXECUTE_AT_END(update_R)
 	}
 	else 
 	{
-		R = T_eig - 1.2 * T_infty;
+		//R = T_eig - 1.2 * T_infty;
+		R = T_eig - T_eig_setpoint;
 	}
 #endif
 
@@ -391,8 +398,12 @@ DEFINE_EXECUTE_AT_END(update_FSR_PIDcontrol)
 	{
 		I_candidate = I_term + Ki * R;
 
+		// Clamp integral term
+		I_candidate = MAX(I_min, MIN(I_max, I_candidate));
+
 		// Evaulate candidate output
 		real V_f_candidate = V_f_bias + Kp * R + I_candidate + Kd * dRdn;
+
 
 		if (V_f_candidate > 0.0 || R > 0.0)
 		{
@@ -414,7 +425,7 @@ DEFINE_EXECUTE_AT_END(update_FSR_PIDcontrol)
 	host_to_node_real_2(V_f, I_term);
 
 #if !RP_NODE
-	Message("Updated FSR to %g m/s using P-control with Kp = %g, Kd = %g, Ki = %g, and R = %g K\n", V_f, Kp, Kd, Ki, R);
+	Message("Updated FSR to %g m/s using P-control with Kp = %g, Kd = %g, Ki = %g, and R = %g K, dRdn=%g, I_term=%g\n", V_f, Kp, Kd, Ki, R, dRdn, I_term);
 #endif
 }
 
@@ -457,6 +468,7 @@ DEFINE_ADJUST(check_eigen_face_zoneID, d)
 
 }
 
+// This did not stop the calculation, why?
 DEFINE_ADJUST(check_update_grid_command, d)
 {
 	bool scheme_command_exists = RP_Variable_Exists_P("user/update_grid_command");
@@ -607,14 +619,8 @@ DEFINE_INIT(init_RP_vars, d)
 			V_f_bias);
 	}
 
-	/*
-	 * Bumpless initialization.
-	 *
-	 * Before the first P or D correction:
-	 *
-	 *     V_f = V_f_bias + I_term
-	 */
-	I_term = V_f - V_f_bias;
+	//I_term = V_f - V_f_bias;
+	I_term = 0.0;
 
 	Message(
 		"PID controller initialized: "
@@ -817,7 +823,7 @@ DEFINE_ON_DEMAND(calc_regression)
 	if (I_AM_NODE_ZERO_P)
 	{
 		// I think loop over all nodes except node zero (This is not well documented by fluent)
-		// Supposedly this macro is in para.h, but it does not see to be there anymore.
+		// Supposedly this macro is in para.h, but it does not seem to be there anymore.
 		compute_node_loop_not_zero(i)
 		{
 			int old_size = size;
@@ -1037,20 +1043,38 @@ DEFINE_ON_DEMAND(calc_regression)
 
 	// Set the proper mesh action command
 #if !RP_NODE
-	if (profile_ok)
+	if (profile_ok && fabs(R) <= 0.5)
 	{
-		RP_Set_String("user/update_grid_command", 
+		RP_Set_String(
+			"user/update_grid_command",
 			"/solve/mesh-motion yes\n"
 			"/define/models/radiation/s2s-parameters/compute-write-vf \"SYS-4.s2s.h5\" yes\n");
 
-		Message("calc_regression: valid profile. Mesh motion enabled.\n");
+		Message(
+			"calc_regression: valid profile and |R| = %g <= 0.5 K. "
+			"Mesh motion enabled.\n",
+			fabs(R));
+
 		N_MESH_UPDATES++;
-		Message0("N_MESH_UPDATES=%d \n", N_MESH_UPDATES);
+		Message("N_MESH_UPDATES=%d\n", N_MESH_UPDATES);
 	}
 	else
 	{
 		RP_Set_String("user/update_grid_command", "\n");
-		Message("Warning: calc_regression: invalid profile. Mesh motion skipped.\n");
+
+		if (!profile_ok)
+		{
+			Message(
+				"Warning: calc_regression: invalid profile. "
+				"Mesh motion skipped.\n");
+		}
+		else
+		{
+			Message(
+				"calc_regression: |R| = %g > 0.5 K. "
+				"Mesh motion skipped.\n",
+				fabs(R));
+		}
 	}
 #endif
 }
@@ -1263,8 +1287,8 @@ DEFINE_ON_DEMAND(set_Kp)
 	}
 	else
 	{
-		Kp = 2e-7; // Default initial FSR value if user-defined parameter does not exist
-		Message("Warning: User-defined parameter 'user/kp' not found. Using default value of 2e-7.\n");
+		Kp = 1e-6; // Default initial FSR value if user-defined parameter does not exist
+		Message("Warning: User-defined parameter 'user/kp' not found. Using default value of 1e-6.\n");
 	}
 
 #endif
@@ -1286,8 +1310,8 @@ DEFINE_ON_DEMAND(set_Kd)
 	}
 	else
 	{
-		Kd = 1e-8; // Default initial FSR value if user-defined parameter does not exist
-		Message("Warning: User-defined parameter 'user/kd' not found. Using default value of 1e-8.\n");
+		Kd = 1e-7; // Default initial FSR value if user-defined parameter does not exist
+		Message("Warning: User-defined parameter 'user/kd' not found. Using default value of 1e-7.\n");
 	}
 
 #endif
@@ -1309,7 +1333,7 @@ DEFINE_ON_DEMAND(set_Ki)
 	}
 	else
 	{
-		Ki = 2.5e-9; // Default initial FSR value if user-defined parameter does not exist
+		Ki = 7.5e-9; // Default initial FSR value if user-defined parameter does not exist
 		Message("Warning: User-defined parameter 'user/ki' not found. Using default value of %g\n", Ki);
 	}
 
@@ -1344,7 +1368,7 @@ DEFINE_ON_DEMAND(set_V_f_bias)
 	}
 	else
 	{
-		real V_f_bias_new = 65e-6;
+		real V_f_bias_new = 40e-6;
 
 		
 		// Apply the default bias without changing the current
@@ -1368,6 +1392,28 @@ DEFINE_ON_DEMAND(set_V_f_bias)
 		"I_term adjusted to %g m/s\n",
 		V_f_bias,
 		I_term);
+}
+
+DEFINE_ON_DEMAND(set_T_eig_setpoint)
+{
+#if !RP_NODE
+	bool t_eig_setpoint_exists = RP_Variable_Exists_P("user/t_eig_setpoint");
+
+	if (t_eig_setpoint_exists)
+	{
+		T_eig_setpoint = RP_Get_Real("user/t_eig_setpoint");
+		Message("User-defined parameter 'user/t_eig_setpoint' found with value %g\n", T_eig_setpoint);
+	}
+	else
+	{
+		T_eig_setpoint = 360; 
+		Message("Warning: User-defined parameter 'user/t_eig_setpoint' not found. Using default value of %g.\n", T_eig_setpoint);
+	}
+#endif
+
+	// Pass to nodes 
+	host_to_node_real_1(T_eig_setpoint);
+	Message0("T_eig_setpoint initialized to %g \n", T_eig_setpoint);
 }
 
 DEFINE_ON_DEMAND(set_N_MESH_UPDATE_IGNORE)
@@ -1487,6 +1533,7 @@ DEFINE_RW_FILE(read_FSR, fp)
 
 DEFINE_RW_HDF_FILE(write_FSR_hdf, filename)
 {
+	// Saves data to cas and dat file. 
 	size_t nelems = 1;
 
 	char *fsr_path = "/FSR_data";
@@ -1518,16 +1565,20 @@ DEFINE_RW_HDF_FILE(write_FSR_hdf, filename)
 		&eigen_face_zoneID_real,
 		nelems);
 
+	char *I_term_path = "/I_term";
+	Write_Complete_User_Dataset(filename, I_term_path, &I_term, nelems);
+
 	Message0(
 		"FSR parameters written: "
 		"V_f=%g m/s, V_f_bias=%g m/s, "
-		"Kp=%g, Ki=%g, Kd=%g, eigen_zoneID=%d\n",
+		"Kp=%g, Ki=%g, Kd=%g, eigen_zoneID=%d, I_term=%g \n",
 		V_f,
 		V_f_bias,
 		Kp,
 		Ki,
 		Kd,
-		eigen_face_zoneID);
+		eigen_face_zoneID,
+		I_term);
 }
 
 DEFINE_RW_HDF_FILE(read_FSR_hdf, filename)
@@ -1556,7 +1607,6 @@ DEFINE_RW_HDF_FILE(read_FSR_hdf, filename)
 
 	char *eigen_zone_path = "/eigen_zoneID_data";
 	real eigen_face_zoneID_real = 0.0;
-
 	Read_Complete_User_Dataset(
 		filename,
 		eigen_zone_path,
@@ -1565,11 +1615,15 @@ DEFINE_RW_HDF_FILE(read_FSR_hdf, filename)
 
 	eigen_face_zoneID = (int)eigen_face_zoneID_real;
 
+	char *I_term_path = "/I_term";
+	Read_Complete_User_Dataset(filename, I_term_path, &I_term, nelems);
+
+
 	/*
 	 * Reset the controller state consistently with the restored
 	 * flame-spread rate and bias.
 	 */
-	I_term = V_f - V_f_bias;
+	//I_term = V_f - V_f_bias;
 
 	R = 0.0;
 	R_old = 0.0;
@@ -1577,23 +1631,27 @@ DEFINE_RW_HDF_FILE(read_FSR_hdf, filename)
 	dRdn_old = 0.0;
 
 	/* Send values used on compute nodes. */
-	host_to_node_real_1(V_f);
-	host_to_node_real_1(V_f_bias);
-	host_to_node_real_1(Kp);
-	host_to_node_real_1(Ki);
-	host_to_node_real_1(Kd);
+	node_to_host_real_6(V_f, V_f_bias, Kp, Ki, Kd, I_term);
+	// host_to_node_real_1(V_f);
+	// host_to_node_real_1(V_f_bias);
+	// host_to_node_real_1(Kp);
+	// host_to_node_real_1(Ki);
+	// host_to_node_real_1(Kd);
 
-	host_to_node_int_1(eigen_face_zoneID);
+	node_to_host_int_1(eigen_face_zoneID);
+	//host_to_node_int_1(eigen_face_zoneID);
 
 	Message0(
 		"FSR parameters read: "
 		"V_f=%g m/s, V_f_bias=%g m/s, "
-		"Kp=%g, Ki=%g, Kd=%g, eigen_zoneID=%d\n",
+		"Kp=%g, Ki=%g, Kd=%g, eigen_zoneID=%d, "
+		"I_term=%g\n",
 		V_f,
 		V_f_bias,
 		Kp,
 		Ki,
 		Kd,
-		eigen_face_zoneID);
+		eigen_face_zoneID,
+		I_term);
 }
 
