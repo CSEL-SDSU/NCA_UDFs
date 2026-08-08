@@ -35,7 +35,7 @@ static real R;
 static real R_old; 
 static real dRdn = 0;
 static real dRdn_old = 0;
-static const real alpha = 0.1667; 
+static const real alpha = 0.1667; //Derivative term under-relaxation
 static int eigen_face_zoneID = -1; // Zone ID of separated surface where temp is monitored
 static const real T_infty = 300; 
 static real T_eig_setpoint = 360; // Pseudo fixed temperature of eigen face
@@ -56,6 +56,12 @@ static real r_eig_g[ND_ND] = {0.0, 0.0};
 // Dynamic grid update variables
 static int N_MESH_UPDATE_IGNORE = 5000; //# of iterations to ignore before adjusting grid
 static int N_MESH_UPDATES = 0; // Counter for number of mesh updates performed
+
+// Dynamic Grid Under-relaxation
+static real alpha_grid = 0.5; // Under-relaxation factor for grid motion, 0.5 is a good starting point
+
+// Dynamic grid largest displacement residual. Should get smaller with each update
+static real largest_displacement = 0.0; 
 
 static void cleanup_profile(void)
 {
@@ -755,7 +761,7 @@ DEFINE_ON_DEMAND(calc_regression)
 		}
 	}
 	end_f_loop(f, t)
-
+	
 	Message("faces:%d found on partition/node: %d \n", size, myid);
 
 	// Send the size (number of faces) to node zero from each node
@@ -903,7 +909,7 @@ DEFINE_ON_DEMAND(calc_regression)
 		
 		// allocate y_f_new on node zero 
 		y_f_new = malloc(size * sizeof(real));
-
+		
 		for (int k = 0; k < size; k++)
 		{
 			// check for infinite slope
@@ -921,6 +927,16 @@ DEFINE_ON_DEMAND(calc_regression)
 			//I += mdot_f[k]*nhat_x[k] / A_f[k] / sqrt(pow(rho * V_f * A_f[k], 2) + pow(mdot_f[k], 2));
 
 			y_f_new[k] = r_eig[1] + I;
+
+			// // Apply under-relaxation to new profile to help steady state convergence
+			// y_f_new[k] = y_f[k] + alpha_grid * (y_f_new[k] - y_f[k]);
+			
+			// // Update the largest displacement
+			// real displacement = fabs(y_f_new[k] - y_f[k]);
+			// if (displacement > largest_displacement)
+			// {
+			// 	largest_displacement = displacement;
+			// }
 
 			Message0("y_f_new(x = %g m) = %g m \n", x_f[k], y_f_new[k]);
 		}	
@@ -1000,6 +1016,7 @@ DEFINE_ON_DEMAND(calc_regression)
 	// Loop over nodes and interpolate their new position
 	Node *v; 
 	int n;
+	largest_displacement = 0.0;
 
 	begin_f_loop(f, t)
 	{
@@ -1008,6 +1025,9 @@ DEFINE_ON_DEMAND(calc_regression)
 			v = F_NODE(f, t, n);
 			real x_node = NODE_X(v);
 			real y_node_new;
+			real y_node_old = NODE_Y(v);
+			real displacement_residual = 0.0;
+
 
 			// if the node is left of the first centroid, it connects to the
 			// eigen face and should not move. 
@@ -1020,6 +1040,21 @@ DEFINE_ON_DEMAND(calc_regression)
 				y_node_new = interp1d(x_f_g, y_f_new_g, size, x_node, true);
 			}
 			
+			// Calcuate displacement residual based on target position and current position. 
+			// Do not use the under-relaxes postion b/c that would change the residual with the under-relaxation
+			displacement_residual = fabs(y_node_new - y_node_old);
+			if (displacement_residual > largest_displacement)
+			{
+				largest_displacement = displacement_residual;
+			}
+
+			// Apply under-relaxation to new profile
+			y_node_new = y_node_old + alpha_grid * (y_node_new - y_node_old);
+
+			//displacement_residual = fabs(y_node_new - y_node_old);
+
+			
+			// Calculate 
 			// Print new coordinates (may duplicate)
 			Message("Node would be moved: y_node_new(x = %g m) = %g m \n", x_node, y_node_new);
 		}
@@ -1035,15 +1070,23 @@ DEFINE_ON_DEMAND(calc_regression)
 	//free(y_f_new);
 
 	profile_ok = PRF_GILOW1(profile_ok); //if profile_ok is zero on any node, set it to zero on all nodes 
+	
+	//get the largest displacement on all nodes
+	largest_displacement = PRF_GRHIGH1(largest_displacement); //get the largest displacement on all nodes
+	Message0("calc_regression: largest_displacement = %g m \n", largest_displacement);
+	
 #endif 
 
 	//update profile_ok on host
-
 	node_to_host_int_1(profile_ok);
 
+	// update largest_displacement on host
+	node_to_host_real_1(largest_displacement);
+
+	//PRF_GSYNC();
 	// Set the proper mesh action command
 #if !RP_NODE
-	if (profile_ok && fabs(R) <= 0.5)
+	if (profile_ok && fabs(R) <= 0.05)
 	{
 		RP_Set_String(
 			"user/update_grid_command",
@@ -1051,7 +1094,7 @@ DEFINE_ON_DEMAND(calc_regression)
 			"/define/models/radiation/s2s-parameters/compute-write-vf \"SYS-4.s2s.h5\" yes\n");
 
 		Message(
-			"calc_regression: valid profile and |R| = %g <= 0.5 K. "
+			"calc_regression: valid profile and |R| = %g <= 0.05 K. "
 			"Mesh motion enabled.\n",
 			fabs(R));
 
@@ -1071,7 +1114,7 @@ DEFINE_ON_DEMAND(calc_regression)
 		else
 		{
 			Message(
-				"calc_regression: |R| = %g > 0.5 K. "
+				"calc_regression: |R| = %g > 0.05 K. "
 				"Mesh motion skipped.\n",
 				fabs(R));
 		}
@@ -1105,6 +1148,7 @@ DEFINE_GRID_MOTION(regress_surface, d, dt, time, dtime)
 		{
 			v = F_NODE(f, t, n);
 			real x_node = NODE_X(v);
+			real y_node_old = NODE_Y(v);
 			real y_node_new;
 
 			if (NODE_POS_NEED_UPDATE (v))
@@ -1120,6 +1164,9 @@ DEFINE_GRID_MOTION(regress_surface, d, dt, time, dtime)
 				{
 					y_node_new = interp1d(x_f_g, y_f_new_g, size_g, x_node, true);
 				}
+
+				// Apply under-relaxation to new profile
+				y_node_new = y_node_old + alpha_grid * (y_node_new - y_node_old);
 				
 				r_new[0] = x_node;
 				r_new[1] = y_node_new;
@@ -1214,6 +1261,12 @@ DEFINE_REPORT_DEFINITION_FN(flame_spread_rate)
 DEFINE_REPORT_DEFINITION_FN(R_eigen_temp_diff)
 {
 	return R; // Return residual for report definition
+}
+
+// Stores the largest displacment of the last/most recent mesh update
+DEFINE_REPORT_DEFINITION_FN(largest_displacement_report)
+{
+	return largest_displacement; // Return largest displacement for report definition
 }
 
 DEFINE_ON_DEMAND(check_rp_vars)
@@ -1511,7 +1564,28 @@ DEFINE_ON_DEMAND(set_eigen_face_zoneID)
 	Message("eigen_face_zoneID initialized to %d \n", eigen_face_zoneID);
 }
 
+DEFINE_ON_DEMAND(set_grid_urf)
+{
 
+#if !RP_NODE
+	bool grid_urf_exists = RP_Variable_Exists_P("user/grid_urf");
+
+	if (grid_urf_exists)
+	{
+		alpha_grid = RP_Get_Real("user/grid_urf");
+		Message("User-defined parameter 'user/grid_urf' found with value: %g\n", alpha_grid);
+	}
+	else
+	{
+		alpha_grid = 0.5; // Default value if user-defined parameter does not exist
+		Message("Warning: User-defined parameter 'user/grid_urf' not found. Using default value of %g.\n", alpha_grid);
+	}
+#endif
+
+	// Pass parameters to nodes
+	host_to_node_real_1(alpha_grid);
+	Message0("alpha_grid initialized to %g \n",alpha_grid);
+}
 
 /*=====================================================================================*/
 DEFINE_RW_FILE(write_FSR, fp)
