@@ -8,7 +8,7 @@ GY=${GY:-9.81}
 H=${H:-0.00495}
 
 # To run: ./submit_fluent_surf.sh [run name] [case file] 
-# inside the directory with the case file and the NCA_unix.c file
+# inside the directory with the case file, starting data file and the NCA_PIDcontrol_linux.c file
 # make executable by doing chmod +x submit_fluent_surf.sh
 # Optional environment overrides:
 #   FLUENT_NTASKS=8 ./submit_fluent_surf.sh run1 SYS-4.cas.h5
@@ -24,6 +24,12 @@ SUBMIT_DIR=$(pwd)
 CASE_ABS=$(readlink -f "$CASE")
 CASE_LOCAL=$(basename "$CASE_ABS")
 
+# Replace .cas.h5 with .dat.h5
+DAT="${CASE%.cas.h5}.dat.h5"
+DAT_ABS=$(readlink -f "$DAT")
+# Strip leading directory path
+DAT_LOCAL=$(basename "$DAT_ABS")
+
 JOU="${OUT}.jou"
 FINAL_CASE_DATA="${OUT}.cas.h5"
 S2S_FILE="${OUT}.s2s.h5"
@@ -35,9 +41,14 @@ if [[ ! -f "$CASE_ABS" ]]; then
     exit 1
 fi
 
-if [[ ! -f "NCA_gap_unix.c" ]]; then
-    echo "Error: NCA_gap_unix.c not found in current directory: $SUBMIT_DIR" >&2
-    echo "Run this script from the directory containing NCA_gap_unix.c and your Fluent files." >&2
+if [[ ! -f "$DAT_ABS" ]]; then
+    echo "Error: data file not found: $DAT_ABS" >&2
+    exit 1
+fi
+
+if [[ ! -f "NCA_PIDcontrol_regression_linux.c" ]]; then
+    echo "Error: NCA_PIDcontrol_regression_linux.c not found in current directory: $SUBMIT_DIR" >&2
+    echo "Run this script from the directory containing NCA_PIDcontrol_regression_linux.c and your Fluent files." >&2
     exit 1
 fi
 
@@ -50,7 +61,8 @@ mkdir -p "$NEW_FOLDER"
 cd "$NEW_FOLDER"
 
 cp "$CASE_ABS" .
-cp ../NCA_PIDcontrol_regression_unix.c .
+cp "$DAT_ABS" .
+cp ../NCA_PIDcontrol_regression_linux.c .
 
 cat > "$JOU" <<EOF
 ;;; Solution Journal Script for running the NCA Fluent model in batch mode
@@ -62,12 +74,12 @@ cat > "$JOU" <<EOF
 ;;; Gap Height: H=${H}
 
 ;; ------Compile and load UDF------------------------------------------------------
-/define/user-defined/compiled-functions compile "lib_inlet_fsr" yes "NCA_PIDcontrol_regression_unix.c" "" ""
+/define/user-defined/compiled-functions compile "lib_inlet_fsr" yes "NCA_PIDcontrol_regression_linux.c" "" ""
 /define/user-defined/compiled-functions load "lib_inlet_fsr"
 
 ;; ------Read case file------------------------------------------------------------
 /define/user-defined/auto-compile-compiled-udfs no
-/file/read-case "${CASE_LOCAL}"
+/file/read-case-data "${CASE_LOCAL}"
 
 ;; ------Set gravity---------------------------------------------------------------
 /define/operating-conditions/gravity yes ${GX} ${GY}
@@ -76,31 +88,35 @@ cat > "$JOU" <<EOF
 /define/models/radiation/s2s-parameters compute-write-vf "${S2S_FILE}"
 
 ;; ------Initialize----------------------------------------------------------------
-/solve/initialize/compute-defaults/velocity-inlet inlet
-/solve/initialize/initialize-flow
-/solve/patch () ignition () temperature 1900
-/solve/patch () downstream () species-3 0
+;; Initialization and patches not needed when using .dat file to initialize
+;;/solve/initialize/compute-defaults/velocity-inlet inlet
+;;/solve/initialize/initialize-flow
+;;/solve/patch () ignition () temperature 1700
+;;/solve/patch () downstream () species-3 0
 
-;; UDF setup
-(rp-var-define 'user/u_mean 0.145 'real #f)
+;;-------UDF setup---------------------------------------------------------
+;; other RP variables should be stored in the case file and are read when the case file is read.
+;; The following variables are set here to make sure they are correct.
+
+(rp-var-define 'user/u_mean 0.15 'real #f)
 /define/user-defined/execute-on-demand "check_u_mean::lib_inlet_fsr"
 
-(rp-var-define 'user/v_f_init 0 'real #f)
-/define/user-defined/execute-on-demand "set_FSR::lib_inlet_fsr"
-
-(rp-var-define 'user/alpha 0.5 'real #f)
-/define/user-defined/execute-on-demand "set_alpha::lib_inlet_fsr"
-
-(rp-var-define 'user/h ${H} 'real #f)
-/define/user-defined/execute-on-demand "check_h::lib_inlet_fsr"
+;; For setups with changing gap height
+;;
+;; (rp-var-define 'user/h ${H} 'real #f)
+;; /define/user-defined/execute-on-demand "check_h::lib_inlet_fsr"
 
 ;; ------Solve---------------------------------------------------------------------
 ;; Make sure derivatives are availible
 /solve/set/expert no no yes no
 ;; Make sure species mass fraction gradients are availible
 /define/models/species/save-gradients yes
-;;/solve/iterate 50 
-/solve/iterate 300000
+
+;; Do 50 iterations for testing
+/solve/iterate 50 
+
+;; Do 500000 max iterations for real calculation
+;;/solve/iterate 500000
 
 ;; ------List available CGNS export scalars ---------------------------------------
 ;;/file/export/cgns "scalar_probe" full-domain yes yes
