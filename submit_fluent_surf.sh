@@ -79,7 +79,7 @@ cat > "$JOU" <<EOF
 
 ;; ------Read case file------------------------------------------------------------
 /define/user-defined/auto-compile-compiled-udfs no
-/file/read-case-data "${CASE_LOCAL}"
+/file/read-case "${CASE_LOCAL}"
 
 ;; ------Set gravity---------------------------------------------------------------
 /define/operating-conditions/gravity yes ${GX} ${GY}
@@ -94,12 +94,16 @@ cat > "$JOU" <<EOF
 ;;/solve/patch () ignition () temperature 1700
 ;;/solve/patch () downstream () species-3 0
 
+
+;; Read previous solution for initialization
+/file/read-data "${DAT_LOCAL}"
+
 ;;-------UDF setup---------------------------------------------------------
 ;; other RP variables should be stored in the case file and are read when the case file is read.
 ;; The following variables are set here to make sure they are correct.
 
 (rp-var-define 'user/u_mean 0.15 'real #f)
-/define/user-defined/execute-on-demand "check_u_mean::lib_inlet_fsr"
+/define/user-defined/execute-on-demand "check_rp_vars::lib_inlet_fsr"
 
 ;; For setups with changing gap height
 ;;
@@ -113,10 +117,13 @@ cat > "$JOU" <<EOF
 /define/models/species/save-gradients yes
 
 ;; Do 50 iterations for testing
-/solve/iterate 50 
+;;/solve/iterate 50 
+
+;; Clear ISAT table before calculation to prevent the no reaction bug
+/define/models/species/clear-isat-table
 
 ;; Do 500000 max iterations for real calculation
-;;/solve/iterate 500000
+/solve/iterate 500000
 
 ;; ------List available CGNS export scalars ---------------------------------------
 ;;/file/export/cgns "scalar_probe" full-domain yes yes
@@ -125,9 +132,10 @@ cat > "$JOU" <<EOF
 ;; ------Write output case and data -----------------------------------------------
 /file/write-case-data "${FINAL_CASE_DATA}"
 
-/file/export/cgns "${OUT}" surface-select yes yes fluid pmma quartz inlet outlet wall_bottom \
+/file/export/cgns "${OUT}" surface-select fluid pmma quartz inlet outlet wall_bottom \
 wall_isolated_pmma wall_isolated_pmma_out wall_isolated_quartz wall_mass_flux wall_mass_flux-shadow \
- wall_top_channel wall_top_channel-shadow wall_top-quartz wall_upstream wall_upstream-shadow \
+ wall_top_channel wall_top_channel-shadow wall_top_quartz wall_upstream wall_upstream-shadow () \
+yes yes \
  x-coordinate y-coordinate c5h8o2-n-deposition-rate cell-id cell-volume co2 h2o n2 o2 c5o2h8 \
  dco2-dx dco2-dy dh2o-dx dh2o-dy dn2-dx dn2-dy do2-dx do2-dy dc5o2h8-dx dc5o2h8-dy density \
  dt-dx dt-dy heat-flux pressure rad-heat-flux recon-dp-dx recon-dp-dy recon-dt-dx recon-dt-dy \
