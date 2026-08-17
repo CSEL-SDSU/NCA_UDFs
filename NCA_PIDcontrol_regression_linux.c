@@ -13,7 +13,7 @@
 
 #define EPS 2.2204460492503131e-16
 #define sgn(x)  ((x>0) - (x<0))
-
+#define DISPLACEMENT_THRESHOLD 1e-5 // threashold for surface convergence [m]
 /*--- PID-control FSR calculation globals---*/
 static real V_f; //Flame Spread Rate 
 static const int UPDATE_INTERVAL = 1; // Number of iterations between FSR updates
@@ -67,6 +67,7 @@ static real alpha_grid = 0.5; // Under-relaxation factor for grid motion, 0.5 is
 
 // Dynamic grid largest displacement residual. Should get smaller with each update
 static real largest_displacement = 0.0; 
+static int largest_displacement_conv = 0;
 
 static void cleanup_profile(void)
 {
@@ -662,11 +663,7 @@ DEFINE_INIT(init_RP_vars, d)
 	host_to_node_real_1(V_f);
 	Message0("V_f initialized to %g m/s\n", V_f);
 
-	/*
-	 * These broadcasts are not strictly required while the PID
-	 * calculation remains inside #if !RP_NODE, but they preserve
-	 * the same initialization pattern as your original function.
-	 */
+	// broadcast to nodes
 	host_to_node_real_1(Kp);
 	Message0("Kp initialized to %g\n", Kp);
 
@@ -1137,7 +1134,7 @@ DEFINE_ON_DEMAND(calc_regression)
 		else
 		{
 			Message(
-				"calc_regression: |R| = %g > 0.05 K. "
+				"calc_regression: |R| = %g > 0.001 K. "
 				"Mesh motion skipped.\n",
 				fabs(R));
 		}
@@ -1274,6 +1271,28 @@ DEFINE_PROFILE(update_wall_motion, thread, position)
 		//Message("Updated wall motion to %g m/s\n", V_f);
 }
 
+//Limit massflux on surface to rho*V_f
+// Outputs:
+//		net molar reaction rates rr (in kmol/m^3-s for volumetric reaction and kmol/m^2-s for surface reaction)
+//		the units of rr depend on the cell the UDF is being called from.
+//		jacobian, the derivative of the surface net reaction rate wrt to species concentration		   
+// This does not override the stiff chemistry solver, it just replaces the reaction rate the the 
+// stiff chemistry solver integrates. The species are just evolved with a limited reaction rate.
+// DEFINE_NET_REACTION_RATE(limit_surf, c, t, particle, pressure, temp, yi, rr, jac)
+// {
+// 	//Check for surface or volumetric cell
+// 	if (BOUNDARY_FACE_THREAD_P(t))
+// 	{
+// 		// Surface call rr[kmol / (m^2-s)]
+// 		// Pyrolysis only.
+// 	}
+// 	else
+// 	{
+// 		// Volumetric call rr[kmol / (m^3-s)]
+// 	}
+// 	RP_Get_List_Ref_Real()
+// }
+
 // Create Report Definition for FSR
 DEFINE_REPORT_DEFINITION_FN(flame_spread_rate)
 {
@@ -1290,6 +1309,21 @@ DEFINE_REPORT_DEFINITION_FN(R_eigen_temp_diff)
 DEFINE_REPORT_DEFINITION_FN(largest_displacement_report)
 {
 	return largest_displacement; // Return largest displacement for report definition
+}
+
+// Report definition to make a user defined absolute convergence condition.
+// Returns the iteration number when largest_displacemt > threshold
+// returns the iteration number when largest_displacement crossed the threshold when largest_displacement < threshold
+DEFINE_REPORT_DEFINITION_FN(largest_displacement_conv_report)
+{
+	// Since largest_displacement = 0 at start, do not allow convergence during the initial 
+	// surface calculation
+	if (fabs(largest_displacement) > DISPLACEMENT_THRESHOLD || N_MESH_UPDATES < 1)
+	{
+		largest_displacement_conv = N_ITER;
+	}
+
+	return largest_displacement_conv;
 }
 
 DEFINE_ON_DEMAND(check_rp_vars)
