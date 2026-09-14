@@ -230,7 +230,10 @@ static real interp1d(const real *x, const real *y, size_t count, real xq, bool e
 
 /* FD INLET VELOCITY PROFILE */
 /*
-	Modified version of pNCA.c to use RP variable for mean velocity.
+	This funciton was originally written by Patterson, modified by Del Rio Blanco,
+	and further modified by Volponi. Original correlations come from Shah and 
+	London p. 197.
+	Modified version of NCA.c to use RP variable for mean velocity.
 	Put your velocity in the brackets (remove the brackets)
 	Define the variable using the following commands in Fluent TUI:
 	To define: (rp-var-define `user/U_mean [velocity] 'real #f)
@@ -264,7 +267,7 @@ DEFINE_PROFILE(inlet_x_vel_rpvar, thread, position)
 		Message0("Warning: User-defined parameter 'user/u_mean' not found. Using default value of %f m/s.\n", U_mean);
 	}
 
-	U_mean += V_f; // Add calculated FSR to mean velocity for inlet profile
+	// U_mean += V_f; // Add calculated FSR to mean velocity for inlet profile
 
 	U_max = U_mean * ((m + 1) / m) * ((n + 1) / n); /* m/sec; max velocity, at centerline... calc */
 
@@ -273,7 +276,7 @@ DEFINE_PROFILE(inlet_x_vel_rpvar, thread, position)
 		F_CENTROID(x, f, thread);
 		y = 2. * (x[1] - 0.5 * h) / h; /* non-dimensional y coordinate, b/c coord sys is at bottom of geom not centerline... calc */
 
-		F_PROFILE(f, thread, position) = U_max * (1.0 - (y * y)); /* m/sec; velocity as f(y) at centerline... calc */
+		F_PROFILE(f, thread, position) = U_max * (1.0 - (y * y)) + V_f; /* m/sec; velocity as f(y) at centerline... calc */
 	}
 	end_f_loop(f, thread)
 }
@@ -1036,50 +1039,56 @@ DEFINE_ON_DEMAND(calc_regression)
 	// Loop over nodes and interpolate their new position
 	Node *v; 
 	int n;
-	largest_displacement = 0.0;
 
-	begin_f_loop(f, t)
+	profile_ok = PRF_GILOW1(profile_ok); //if profile_ok is zero on any node, set it to zero on all nodes
+	if (profile_ok)
 	{
-		f_node_loop(f, t, n)
+		largest_displacement = 0.0;
+
+		begin_f_loop(f, t)
 		{
-			v = F_NODE(f, t, n);
-			real x_node = NODE_X(v);
-			real y_node_new;
-			real y_node_old = NODE_Y(v);
-			real displacement_residual = 0.0;
-
-
-			// if the node is left of the first centroid, it connects to the
-			// eigen face and should not move. 
-			if (x_node < x_f_g[0])
+			f_node_loop(f, t, n)
 			{
-				y_node_new = r_eig[1]; 
-			}
-			else
-			{
-				y_node_new = interp1d(x_f_g, y_f_new_g, size, x_node, true);
-			}
-			
-			// Calcuate displacement residual based on target position and current position. 
-			// Do not use the under-relaxes postion b/c that would change the residual with the under-relaxation
-			displacement_residual = fabs(y_node_new - y_node_old);
-			if (displacement_residual > largest_displacement)
-			{
-				largest_displacement = displacement_residual;
-			}
+				v = F_NODE(f, t, n);
+				real x_node = NODE_X(v);
+				real y_node_new;
+				real y_node_old = NODE_Y(v);
+				real displacement_residual = 0.0;
 
-			// Apply under-relaxation to new profile
-			y_node_new = y_node_old + alpha_grid * (y_node_new - y_node_old);
 
-			//displacement_residual = fabs(y_node_new - y_node_old);
+				// if the node is left of the first centroid, it connects to the
+				// eigen face and should not move. 
+				if (x_node < x_f_g[0])
+				{
+					y_node_new = r_eig[1]; 
+				}
+				else
+				{
+					y_node_new = interp1d(x_f_g, y_f_new_g, size, x_node, true);
+				}
+				
+				// Calcuate displacement residual based on target position and current position. 
+				// Do not use the under-relaxes postion b/c that would change the residual with the under-relaxation
+				displacement_residual = fabs(y_node_new - y_node_old);
+				if (displacement_residual > largest_displacement)
+				{
+					largest_displacement = displacement_residual;
+				}
 
-			
-			// Calculate 
-			// Print new coordinates (may duplicate)
-			Message("Node would be moved: y_node_new(x = %g m) = %g m \n", x_node, y_node_new);
+				// Apply under-relaxation to new profile
+				y_node_new = y_node_old + alpha_grid * (y_node_new - y_node_old);
+
+				//displacement_residual = fabs(y_node_new - y_node_old);
+
+				
+				// Calculate 
+				// Print new coordinates (may duplicate)
+				Message("Node would be moved: y_node_new(x = %g m) = %g m \n", x_node, y_node_new);
+			}
 		}
+		end_f_loop(f, t)
+
 	}
-	end_f_loop(f, t)
 
 	// Free allocated memory on all nodes. Do not free x_f or y_f_new after installing the profile
 	//free(x_f);
@@ -1087,9 +1096,7 @@ DEFINE_ON_DEMAND(calc_regression)
 	free(mdot_f);
 	free(A_f);
 	free(dx_f);
-	//free(y_f_new);
-
-	profile_ok = PRF_GILOW1(profile_ok); //if profile_ok is zero on any node, set it to zero on all nodes 
+	//free(y_f_new); 
 	
 	//get the largest displacement on all nodes
 	largest_displacement = PRF_GRHIGH1(largest_displacement); //get the largest displacement on all nodes
